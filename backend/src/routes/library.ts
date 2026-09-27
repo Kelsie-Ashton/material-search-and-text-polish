@@ -12,6 +12,13 @@ import {
 } from '../library/directories.js'
 import { sendResult } from '../shared/http.js'
 import { err } from '../shared/result.js'
+import {
+  linkTag,
+  listAssetTags,
+  listTags,
+  pruneOrphanTags,
+  unlinkTag,
+} from '../tags/service.js'
 
 /**
  * 素材库路由。
@@ -198,6 +205,75 @@ export function createLibraryRouter(db: Db, queue: JobQueue): Router {
       return
     }
     sendResult(res, getAsset(db, id))
+  })
+
+  // ------------------------------------------------------------ 标签
+
+  router.get('/tags', (_req, res) => {
+    res.json({ ok: true, value: { items: listTags(db) } })
+  })
+
+  // 注意这条必须排在 /tags/:id 之前——本项目暂时没有那条路由，
+  // 但 Express 是**按注册顺序**匹配的，日后加 /tags/:id 时要记得挪。
+  router.delete('/tags/orphans', (_req, res) => {
+    res.json({ ok: true, value: pruneOrphanTags(db) })
+  })
+
+  router.get('/assets/:id/tags', (req, res) => {
+    const id = parseId(req.params.id)
+    if (id === null) {
+      sendResult(res, err('VALIDATION_FAILED', '素材 id 不合法'), 400)
+      return
+    }
+
+    // 先确认素材存在：不然一个拼错的 id 会得到「空标签列表」，
+    // 与「这个素材确实没有标签」无法区分。
+    const asset = getAsset(db, id)
+    if (!asset.ok) {
+      sendResult(res, asset)
+      return
+    }
+    res.json({ ok: true, value: { items: listAssetTags(db, id) } })
+  })
+
+  router.post('/assets/:id/tags', (req, res) => {
+    const id = parseId(req.params.id)
+    if (id === null) {
+      sendResult(res, err('VALIDATION_FAILED', '素材 id 不合法'), 400)
+      return
+    }
+
+    const body = req.body as { name?: unknown; color?: unknown; source?: unknown } | undefined
+    if (typeof body?.name !== 'string') {
+      sendResult(res, err('TAG_NAME_INVALID', '请提供标签名（name）'), 400)
+      return
+    }
+
+    const source = parseEnum(body.source, ['manual', 'polished', 'extracted'] as const)
+    if (source === null) {
+      sendResult(res, err('VALIDATION_FAILED', '标签来源不合法'), 400)
+      return
+    }
+
+    const result = linkTag(db, id, body.name, {
+      source,
+      color: typeof body.color === 'string' ? body.color : null,
+    })
+
+    // 201 表示真的新建了链接；已经挂过则回 200——
+    // 界面据此决定要不要提示「已存在」，而不是靠猜。
+    const created = result.ok && !result.value.alreadyLinked
+    sendResult(res, result, created ? 201 : 200)
+  })
+
+  router.delete('/assets/:id/tags/:tagId', (req, res) => {
+    const id = parseId(req.params.id)
+    const tagId = parseId(req.params.tagId)
+    if (id === null || tagId === null) {
+      sendResult(res, err('VALIDATION_FAILED', '素材或标签 id 不合法'), 400)
+      return
+    }
+    sendResult(res, unlinkTag(db, id, tagId))
   })
 
   return router

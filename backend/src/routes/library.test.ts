@@ -279,4 +279,143 @@ describe('素材库路由', () => {
       expect(res.body.value.items[0].fileName).toBe('100%纯棉.mp4')
     })
   })
+
+  describe('标签', () => {
+    /** 直接插一条素材——这里测的是标签路由，不必真的扫一次目录 */
+    function insertAsset(fileName: string): number {
+      const now = Date.now()
+      // 素材必须挂在一个真实存在的目录下：外键是开着的，
+      // 随手写个 directory_id = 1 会直接 FOREIGN KEY constraint failed。
+      // （这条约束本身就是「别把 PRAGMA foreign_keys 忘了」的活证明。）
+      let directoryId = db.prepare('SELECT id FROM directories LIMIT 1').get() as
+        | { id: number }
+        | undefined
+      if (!directoryId) {
+        directoryId = {
+          id: Number(
+            db
+              .prepare(
+                `INSERT INTO directories (path, path_key, label, created_at)
+                 VALUES ('C:/m', 'c:/m', '夹具', ?)`,
+              )
+              .run(now).lastInsertRowid,
+          ),
+        }
+      }
+
+      const info = db
+        .prepare(
+          `INSERT INTO assets
+             (directory_id, path, path_key, file_name, ext, kind, size_bytes, mtime_ms,
+              fingerprint, created_at, updated_at)
+           VALUES (?, ?, ?, ?, '.mp4', 'video', 1, ?, '1:1', ?, ?)`,
+        )
+        .run(directoryId.id, `C:/m/${fileName}`, `c:/m/${fileName}`, fileName, now, now, now)
+      return Number(info.lastInsertRowid)
+    }
+
+    it('挂标签返回 201，重复挂返回 200 并说明已存在', async () => {
+      const assetId = insertAsset('探店.mp4')
+
+      const first = await request(app)
+        .post(`/api/library/assets/${assetId}/tags`)
+        .send({ name: '美食' })
+      expect(first.status).toBe(201)
+      expect(first.body.value.alreadyLinked).toBe(false)
+
+      // 重复点「添加」是必然行为，不是错误——用状态码区分
+      // 「新建了」与「本来就挂着」，界面才不用靠猜
+      const again = await request(app)
+        .post(`/api/library/assets/${assetId}/tags`)
+        .send({ name: '美食' })
+      expect(again.status).toBe(200)
+      expect(again.body.value.alreadyLinked).toBe(true)
+    })
+
+    it('缺少标签名返回 400', async () => {
+      const assetId = insertAsset('无名字.mp4')
+      const res = await request(app).post(`/api/library/assets/${assetId}/tags`).send({})
+
+      expect(res.status).toBe(400)
+      expect(res.body.error.code).toBe('TAG_NAME_INVALID')
+    })
+
+    it('素材不存在返回 404，而不是悄悄建一个标签', async () => {
+      const res = await request(app).post('/api/library/assets/9999/tags').send({ name: '美食' })
+
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('ASSET_NOT_FOUND')
+
+      // 一次拼错 id 的请求不该在库里留下孤儿标签
+      const tags = await request(app).get('/api/library/tags')
+      expect(tags.body.value.items).toEqual([])
+    })
+
+    it('对不存在的素材查标签返回 404 而不是空列表', async () => {
+      // 「查不到这个素材」与「这个素材没有标签」必须能分开，
+      // 否则界面会把前者显示成后者的空状态
+      const res = await request(app).get('/api/library/assets/9999/tags')
+
+      expect(res.status).toBe(404)
+      expect(res.body.error.code).toBe('ASSET_NOT_FOUND')
+    })
+
+    it('列出素材的标签，并按 id 摘掉', async () => {
+      const assetId = insertAsset('火锅.mp4')
+      const linked = await request(app)
+        .post(`/api/library/assets/${assetId}/tags`)
+        .send({ name: '美食' })
+      const tagId = linked.body.value.tag.id as number
+
+      const list = await request(app).get(`/api/library/assets/${assetId}/tags`)
+      expect(list.body.value.items.map((t: { name: string }) => t.name)).toEqual(['美食'])
+
+      const removed = await request(app).delete(`/api/library/assets/${assetId}/tags/${tagId}`)
+      expect(removed.status).toBe(200)
+      expect(removed.body.value.removed).toBe(true)
+
+      const after = await request(app).get(`/api/library/assets/${assetId}/tags`)
+      expect(after.body.value.items).toEqual([])
+    })
+
+    it('id 不合法返回 400', async () => {
+      const bad = await request(app).get('/api/library/assets/abc/tags')
+      expect(bad.status).toBe(400)
+
+      const badDelete = await request(app).delete('/api/library/assets/1/tags/xyz')
+      expect(badDelete.status).toBe(400)
+    })
+
+    it('标签列表带使用次数，孤儿标签留在列表里', async () => {
+      const assetId = insertAsset('孤儿.mp4')
+      const linked = await request(app)
+        .post(`/api/library/assets/${assetId}/tags`)
+        .send({ name: '美食' })
+      await request(app).delete(
+        `/api/library/assets/${assetId}/tags/${linked.body.value.tag.id as number}`,
+      )
+
+      const res = await request(app).get('/api/library/tags')
+
+      // 标签列表同时充当词汇表，静默缩水比留几条没人用的更烦人
+      expect(res.body.value.items).toHaveLength(1)
+      expect(res.body.value.items[0].usageCount).toBe(0)
+
+      const pruned = await request(app).delete('/api/library/tags/orphans')
+      expect(pruned.body.value.removed).toBe(1)
+
+      const after = await request(app).get('/api/library/tags')
+      expect(after.body.value.items).toEqual([])
+    })
+
+    it('非法的标签来源返回 400', async () => {
+      const assetId = insertAsset('来源.mp4')
+      const res = await request(app)
+        .post(`/api/library/assets/${assetId}/tags`)
+        .send({ name: '美食', source: '不是来源' })
+
+      expect(res.status).toBe(400)
+      expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    })
+  })
 })
