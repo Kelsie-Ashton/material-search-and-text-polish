@@ -1,0 +1,14 @@
+{
+  "name": "spike-search-tokenizer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "一次性实验：对比 trigram 与 jieba 分词两种中文检索方案的体积与召回",
+  "scripts": {
+    "run": "node run.mjs"
+  },
+  "dependencies": {
+    "@node-rs/jieba": "^2.0.3",
+    "better-sqlite3": "^13.0.3"
+  }
+}
