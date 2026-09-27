@@ -4,6 +4,7 @@ import { createApp } from './app.js'
 import { dataDir, databaseFile, host, port } from './config.js'
 import { openDatabase } from './db/index.js'
 import { migrate } from './db/migrate.js'
+import { reconcileAssetStatus, watchExtractJobs } from './extraction/asset-status.js'
 import { registerJobHandlers } from './jobs/handlers.js'
 import { createJobQueue } from './jobs/queue.js'
 
@@ -13,6 +14,10 @@ const db = openDatabase()
 migrate(db)
 
 const jobQueue = createJobQueue(db)
+
+// 提取任务一落定就把素材状态重新推导一次。挂在这里而不是处理器里，
+// 是因为处理器结束的那一刻 job 行还是 running（见 asset-status.ts 的说明）。
+watchExtractJobs(jobQueue, db)
 
 // 顺序要紧：先注册处理器，再恢复上次残留的任务。
 // 反过来的话，恢复出来的任务会在处理器就位之前被取走，
@@ -24,6 +29,16 @@ registerJobHandlers(jobQueue, db)
 const recovered = jobQueue.recoverInterrupted()
 if (recovered > 0) {
   console.log(`已把 ${recovered} 个上次中断的任务放回队列`)
+}
+
+// 队列恢复了不算完：素材那一侧的 extract_status 是另一张表上的物化列，
+// recoverInterrupted 管不到它。必须在这里再对一次账，否则上次被杀时正在跑的
+// 素材会永远显示「提取中」而没有任何东西在跑，用户只能干等。
+// 顺序也要紧：必须在 recoverInterrupted **之后**，否则被重置回 queued 的任务
+// 会被当作活跃任务，把素材状态又推回「排队中」。
+const reconciled = reconcileAssetStatus(db)
+if (reconciled > 0) {
+  console.log(`已修正 ${reconciled} 个素材的提取状态`)
 }
 
 // 恢复只改状态、不启动消费，所以这一句不能省：
