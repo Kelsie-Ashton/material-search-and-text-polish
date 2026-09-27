@@ -43,7 +43,11 @@ export function createApp(options: AppOptions = {}) {
     })
   })
 
-  api.use('/settings', createSettingsRouter(options.credentialsStore ?? credentialsStore))
+  // 凭证路由不需要 db；偏好路由需要，因此 db 可缺省（见 settings.ts 里的说明）
+  api.use(
+    '/settings',
+    createSettingsRouter(options.credentialsStore ?? credentialsStore, options.db),
+  )
 
   // 素材库路由依赖数据库与任务队列。二者缺一就不挂载——
   // 但这不是「可选功能」：真实入口 index.ts 一定会传，

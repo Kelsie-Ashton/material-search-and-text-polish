@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../app.js'
 import { createCredentialsStore } from '../credentials/store.js'
+import type { Db } from '../db/index.js'
+import { createTestDb } from '../test/temp-db.js'
 
 const REAL_KEY = 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
 
@@ -126,5 +128,86 @@ describe('GET /api/settings/polish-availability', () => {
     const res = await request(app).get('/api/settings/polish-availability')
 
     expect(res.body.value).toEqual({ available: true, model: 'claude-opus-5' })
+  })
+})
+
+/**
+ * 应用偏好路由。
+ *
+ * 单独一组用例，因为这几条**需要数据库**；上面的凭证用例刻意不传 db，
+ * 顺带钉住「偏好路由缺席时凭证路由照常工作」这件事。
+ */
+describe('/api/settings/preferences', () => {
+  let db: Db
+  let dbApp: ReturnType<typeof createApp>
+
+  beforeEach(() => {
+    db = createTestDb()
+    dbApp = createApp({ credentialsStore: createCredentialsStore(file), db })
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('未设置过时返回简体', async () => {
+    const res = await request(dbApp).get('/api/settings/preferences')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, value: { textScript: 'simplified' } })
+  })
+
+  it('改成繁体后能读回来', async () => {
+    const put = await request(dbApp).put('/api/settings/preferences').send({
+      textScript: 'traditional',
+    })
+
+    expect(put.status).toBe(200)
+    // 返回完整偏好：设置页拿它整体刷新，省掉一次 GET
+    expect(put.body.value).toEqual({ textScript: 'traditional' })
+
+    const get = await request(dbApp).get('/api/settings/preferences')
+    expect(get.body.value).toEqual({ textScript: 'traditional' })
+  })
+
+  it('非法取值返回 400 且不改变已存的值', async () => {
+    await request(dbApp).put('/api/settings/preferences').send({ textScript: 'traditional' })
+
+    const res = await request(dbApp).put('/api/settings/preferences').send({ textScript: 'klingon' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+
+    // 拒绝之后原值必须还在：静默回落成简体，用户会在毫无察觉的情况下
+    // 换了保存字形，下次提取时才发现文本全变了。
+    const get = await request(dbApp).get('/api/settings/preferences')
+    expect(get.body.value.textScript).toBe('traditional')
+  })
+
+  it('偏好与凭证互不干扰', async () => {
+    // 两者存储位置完全不同（表 vs 文件）。这条断言的是：
+    // 改偏好不会碰凭证文件，清凭证也不会重置偏好。
+    await request(dbApp).put('/api/settings/credentials').send({ apiKey: REAL_KEY })
+    await request(dbApp).put('/api/settings/preferences').send({ textScript: 'traditional' })
+
+    await request(dbApp).delete('/api/settings/credentials')
+
+    const res = await request(dbApp).get('/api/settings/preferences')
+    expect(res.body.value.textScript).toBe('traditional')
+
+    // 反过来：偏好表里不该出现任何密钥痕迹
+    const dumped = JSON.stringify(db.prepare('SELECT * FROM app_settings').all())
+    expect(dumped).not.toContain(REAL_KEY)
+    expect(dumped).not.toContain(REAL_KEY.slice(0, 24))
+  })
+
+  it('没有数据库时该路由不存在，但凭证路由照常工作', async () => {
+    // 降级必须干净：宁可返回 JSON 404，也不能挂一个一调就 500 的路由。
+    const noDb = await request(app).get('/api/settings/preferences')
+    expect(noDb.status).toBe(404)
+    expect(noDb.body.error.code).toBe('NOT_FOUND')
+
+    const creds = await request(app).get('/api/settings/credentials')
+    expect(creds.status).toBe(200)
   })
 })
