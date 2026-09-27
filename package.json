@@ -14,10 +14,15 @@
     "build": "npm run build --workspace frontend && npm run build --workspace backend",
     "start": "npm run start --workspace backend",
     "test": "npm run test --workspace backend && npm run test --workspace frontend",
-    "typecheck": "npm run typecheck --workspace backend && npm run typecheck --workspace frontend"
+    "typecheck": "npm run typecheck --workspace backend && npm run typecheck --workspace frontend",
+    "lint": "eslint .",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "verify": "npm run lint && npm run check:secrets && npm run typecheck && npm test"
   },
   "devDependencies": {
-    "concurrently": "^10.0.5"
+    "concurrently": "^10.0.5",
+    "eslint": "^10.11.0",
+    "typescript-eslint": "^8.70.1"
   },
   "engines": {
     "node": ">=20"
