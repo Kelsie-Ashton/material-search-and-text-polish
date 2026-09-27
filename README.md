@@ -179,8 +179,8 @@
 
 ```bash
 # 1. 获取代码
-git clone <仓库地址>
-cd my-vibe-project
+git clone https://github.com/Kelsie-Ashton/material-search-and-text-polish.git
+cd material-search-and-text-polish
 
 # 2. 安装依赖（首次约需几分钟；会下载一个自带的 ffmpeg 二进制，属正常现象）
 npm install
@@ -435,7 +435,7 @@ git status              # 确认列表里没有 data/ 与任何凭证文件
 ### 项目结构
 
 ```
-my-vibe-project/
+material-search-and-text-polish/
 ├── backend/                Node.js + Express 后端
 │   └── src/
 │       ├── app.ts          组装中间件与路由（与监听分离，便于测试）
