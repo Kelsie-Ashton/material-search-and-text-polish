@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { toUserMessage } from '../api/client'
-import { type JobRecord, cancelJob, getJob } from '../api/jobs'
+import { type JobRecord, cancelJob, getJob, listJobs } from '../api/jobs'
 import {
   type AssetSummary,
   type DirectoryRecord,
@@ -61,6 +61,14 @@ function asScanSummary(result: unknown): ScanSummary | null {
 /** 轮询间隔。扫描是分批提交的，800ms 足以让进度看起来是连续的。 */
 const POLL_INTERVAL_MS = 800
 
+/**
+ * 素材列表上「提取进度」那一行的刷新间隔。
+ *
+ * 比扫描慢：这里只是给每一行补一句「正在转写」之类的说明，
+ * 状态徽章本身来自素材自己的 `extractStatus`，不靠这个轮询。
+ */
+const EXTRACT_POLL_INTERVAL_MS = 2000
+
 export default function LibraryPage() {
   const [directories, setDirectories] = useState<DirectoryRecord[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -84,6 +92,9 @@ export default function LibraryPage() {
   const [assetsLoading, setAssetsLoading] = useState(false)
 
   const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null)
+
+  /** 正在跑的提取任务，按素材 id 索引。只用来在每一行下面补一句进度说明。 */
+  const [activeExtracts, setActiveExtracts] = useState<Record<number, JobRecord>>({})
 
   const reloadDirectories = useCallback(async () => {
     try {
@@ -121,6 +132,59 @@ export default function LibraryPage() {
 
   useEffect(() => {
     void reloadAssets()
+  }, [reloadAssets])
+
+  // ---------------------------------------------------------- 提取进度轮询
+
+  /** 上一轮还在跑的素材。用来发现「有任务刚刚结束」。 */
+  const previousActive = useRef<Set<number>>(new Set())
+
+  /**
+   * 一直轮询在跑的提取任务，**不是只在点了提取之后才轮询**。
+   *
+   * 任务状态住在后端队列里，不在这个页面里：用户刷新一下页面，
+   * 正在跑的转写照跑不误。只有一直问，回到这一页时才看得见它。
+   *
+   * 一次问全（`/api/jobs?type=extract&active=1`）而不是每行问一次——
+   * 200 行素材就是每秒 200 个请求。
+   *
+   * 这条轮询拿到的只是「进度说明」那一句小字，状态徽章来自素材自己的
+   * `extractStatus`。所以它失败或漏一轮都不会让界面显示错的**状态**，
+   * 最多是少一句说明——失败就静默跳过，下一轮自愈。
+   */
+  useEffect(() => {
+    let cancelled = false
+    let timer = 0
+
+    async function tick() {
+      try {
+        const jobs = await listJobs({ type: 'extract', activeOnly: true })
+        if (cancelled) return
+
+        const next: Record<number, JobRecord> = {}
+        for (const job of jobs) {
+          if (job.targetId !== null) next[job.targetId] = job
+        }
+        setActiveExtracts(next)
+
+        // 有任务刚刚不在了 → 它跑完了。列表里的状态徽章是当时读回来的，
+        // 现在多半已经过期，重新拉一次。不这样做的话，用户盯着看的那一行
+        // 会一直停在「提取中」，直到他自己做点别的触发刷新。
+        const finished = [...previousActive.current].some((id) => next[id] === undefined)
+        previousActive.current = new Set(Object.keys(next).map(Number))
+        if (finished) void reloadAssets()
+      } catch {
+        // 静默：这是后台刷新，弹提示只会打扰用户
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => void tick(), EXTRACT_POLL_INTERVAL_MS)
+      }
+    }
+
+    void tick()
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
   }, [reloadAssets])
 
   /**
@@ -515,6 +579,14 @@ export default function LibraryPage() {
                     <span className={`badge badge-${asset.extractStatus}`}>
                       {STATUS_LABELS[asset.extractStatus]}
                     </span>
+                    {/* 排队中的任务没有进度说明（它还没开始），
+                        但徽章已经写着「排队中」，两句话说的是同一件事，
+                        这里就不再重复一遍。 */}
+                    {activeExtracts[asset.id]?.progressMessage ? (
+                      <div className="row-progress">
+                        {activeExtracts[asset.id]?.progressMessage}
+                      </div>
+                    ) : null}
                   </td>
                   <td>
                     {asset.tags.length === 0 ? (
@@ -568,6 +640,9 @@ export default function LibraryPage() {
           assetId={selectedAssetId}
           onClose={() => setSelectedAssetId(null)}
           onTagsChanged={() => void reloadAssets()}
+          // 开始与结束都要刷：后端在入队那一刻就把素材推成了「排队中」，
+          // 列表上那一行立刻就该变。
+          onExtractionChanged={() => void reloadAssets()}
         />
       ) : null}
     </section>

@@ -737,6 +737,65 @@ code {
   font-weight: 600;
 }
 
+/* ---------- 提取 ---------- */
+
+/* 列表行里的进度说明。小一号、压在徽章下面，是为了让它读起来像
+   徽章的补充说明，而不是另一个独立的状态。 */
+.row-progress {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--muted);
+  max-width: 160px;
+}
+
+.extract-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+/* 提到正文之前：转写的结果常常有很多段，排在标签下面会被挤到看不见的地方。 */
+.segment-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.segment-row {
+  display: flex;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.segment-row + .segment-row {
+  border-top: 1px solid var(--border);
+}
+
+/* 定宽 + 等宽数字：时间轴竖着对齐，扫一眼就能定位到某一分钟。 */
+.segment-time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  padding-top: 1px;
+  cursor: help;
+}
+
+.segment-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ---------- 检索 ---------- */
 
 .search-form {
