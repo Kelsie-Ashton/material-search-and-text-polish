@@ -378,4 +378,92 @@ describe('任务队列', () => {
       gate.open()
     })
   })
+
+  describe('任务落定回调', () => {
+    /**
+     * 回调存在的唯一理由是让别的表上跟着任务走的冗余列有人收尾，
+     * 而它能收尾的前提是**回调收到的是终态**。所以这个 describe 的重点
+     * 不是「回调被调用了」，而是「调用时任务已经是终态了」。
+     */
+    it('回调收到的是终态，不是运行中的状态', async () => {
+      const seen: string[] = []
+      queue.onSettled((job) => {
+        seen.push(job.status)
+        // 回调里读数据库也必须已经是终态——监听者多半是照着库里的真相
+        // 去推导别的表，只看传进来的对象是不够的
+        seen.push(statusOf(job.id))
+      })
+
+      queue.register('scan', async () => ok(null))
+      queue.enqueue('scan', 1)
+      await queue.whenIdle()
+
+      expect(seen).toEqual(['succeeded', 'succeeded'])
+    })
+
+    it('成功、失败、排队中取消都算落定，三种都会通知', async () => {
+      const seen: Array<{ status: string; reason: string | null }> = []
+      queue.onSettled((job) => {
+        seen.push({ status: job.status, reason: job.errorCode })
+      })
+
+      queue.register('scan', async () => ok(null))
+      queue.register('extract', async () => err('EXTRACTION_FAILED', '模型没加载上'))
+
+      const succeeded = queue.enqueue('scan', 1)
+      const failed = queue.enqueue('extract', 2)
+      await queue.whenIdle()
+
+      // 排队中的那条直接抹掉——它永远不会进处理器，但同样是一次落定
+      const queued = queue.enqueue('extract', 3)
+      if (!succeeded.ok || !queued.ok) throw new Error('入队失败')
+      queue.cancel(queued.value.id)
+      await queue.whenIdle()
+
+      expect(failed.ok).toBe(true)
+      expect(seen).toContainEqual({ status: 'succeeded', reason: null })
+      expect(seen).toContainEqual({ status: 'failed', reason: 'EXTRACTION_FAILED' })
+      expect(seen).toContainEqual({ status: 'canceled', reason: null })
+    })
+
+    it('没有注册处理器的任务也通知——它同样结束了', async () => {
+      const seen: string[] = []
+      queue.onSettled((job) => seen.push(job.status))
+
+      queue.enqueue('polish', 1)
+      await queue.whenIdle()
+
+      expect(seen).toEqual(['failed'])
+    })
+
+    it('回调抛异常不会拖垮队列，后面的任务照跑', async () => {
+      // 回调跑在 finish() 里面，而 finish() 在 runJob 的 catch 分支里也会被调用——
+      // 抛出去的异常会被当成「任务执行失败」，一个写坏的监听者就能让整个队列停摆。
+      const seen: string[] = []
+      queue.onSettled(() => {
+        throw new Error('这个监听者坏了')
+      })
+      queue.onSettled((job) => seen.push(`第二个监听者:${job.status}`))
+
+      queue.register('scan', async () => ok(null))
+      queue.enqueue('scan', 1)
+      queue.enqueue('scan', 2)
+      await queue.whenIdle()
+
+      // 坏掉的监听者没能拦住第二个监听者，也没能拦住第二个任务
+      expect(seen).toEqual(['第二个监听者:succeeded', '第二个监听者:succeeded'])
+    })
+
+    it('可以挂多个监听者，互不影响', async () => {
+      const calls: string[] = []
+      queue.onSettled(() => calls.push('甲'))
+      queue.onSettled(() => calls.push('乙'))
+
+      queue.register('scan', async () => ok(null))
+      queue.enqueue('scan', 1)
+      await queue.whenIdle()
+
+      expect(calls).toEqual(['甲', '乙'])
+    })
+  })
 })

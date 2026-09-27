@@ -107,8 +107,22 @@ export interface JobQueue {
   register: (type: JobType, handler: JobHandler) => void
   enqueue: (type: JobType, targetId: number | null, payload?: unknown) => Result<JobRecord>
   get: (id: number) => Result<JobRecord>
-  list: (options?: { type?: JobType; activeOnly?: boolean }) => JobRecord[]
+  list: (options?: {
+    type?: JobType
+    activeOnly?: boolean
+    /** 只看某个目标的任务（scan → 目录 id，extract/polish → 素材 id） */
+    targetId?: number
+  }) => JobRecord[]
   cancel: (id: number) => Result<CancelOutcome>
+  /**
+   * 注册「任务落定」回调：任务进入 succeeded / failed / canceled 之后触发。
+   *
+   * 别的表上若有跟着任务走的冗余列，靠它同步。素材的 `extract_status`
+   * 就是这么跟着走的——**这个回调必须由队列在写完 job 行之后调用**，
+   * 否则监听者读到的 job 状态还是 running，推导出来的自然是「提取中」。
+   * 回调抛异常不会影响队列：单个监听者坏了不该让后面所有任务都轮不上。
+   */
+  onSettled: (listener: (job: JobRecord) => void) => void
   /** 把上次进程留下的 running 任务放回队列。必须在注册处理器之后、start() 之前调用。 */
   recoverInterrupted: () => number
   /**
@@ -125,6 +139,8 @@ export interface JobQueue {
 
 export function createJobQueue(db: Db): JobQueue {
   const handlers = new Map<JobType, JobHandler>()
+
+  const settleListeners: Array<(job: JobRecord) => void> = []
 
   /** handler 通过它读到最新的 cancel_requested——不能只看 claim 时的快照 */
   const cancellationOf = new Map<number, { requested: boolean }>()
@@ -171,6 +187,26 @@ export function createJobQueue(db: Db): JobQueue {
       options.errorMessage ?? null,
       id,
     )
+
+    // 通知必须在写完这一行**之后**：监听者要读 job 的终态来决定别的表怎么改。
+    // 放在写之前（或指望 handler 自己收尾）会让它们读到 running，
+    // 于是把刚定下来的终态又推回中间态——而且不报任何错。
+    if (settleListeners.length === 0) return
+
+    const row = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRowShape | undefined
+    if (!row) return
+    const record = toRecord(row)
+
+    for (const listener of settleListeners) {
+      try {
+        listener(record)
+      } catch (cause) {
+        // 监听者坏了是它自己的事。把异常吞在这里，是因为 finish() 还跑在
+        // runJob 的 catch 分支里——抛出去会被当成「任务执行失败」，
+        // 一个同步失败的监听者就能让整个队列停摆。
+        console.error('[jobs] 任务落定回调抛错：', cause)
+      }
+    }
   }
 
   async function runJob(job: JobRecord): Promise<void> {
@@ -262,6 +298,10 @@ export function createJobQueue(db: Db): JobQueue {
       handlers.set(type, handler)
     },
 
+    onSettled(listener) {
+      settleListeners.push(listener)
+    },
+
     enqueue(type, targetId, payload) {
       try {
         const info = inTransaction(db, () => {
@@ -312,6 +352,10 @@ export function createJobQueue(db: Db): JobQueue {
         clauses.push('type = ?')
         params.push(options.type)
       }
+      if (options.targetId !== undefined) {
+        clauses.push('target_id = ?')
+        params.push(options.targetId)
+      }
       if (options.activeOnly) {
         clauses.push("status IN ('queued', 'running')")
       }
@@ -327,13 +371,11 @@ export function createJobQueue(db: Db): JobQueue {
       if (!row) return err('JOB_NOT_FOUND', `任务不存在（id=${id}）`, { id })
 
       if (row.status === 'queued') {
-        // 还没开始跑，直接抹掉——不会留下任何半成品
-        inTransaction(db, () => {
-          db.prepare("UPDATE jobs SET status = 'canceled', finished_at = ? WHERE id = ?").run(
-            Date.now(),
-            id,
-          )
-        })
+        // 还没开始跑，直接抹掉——不会留下任何半成品。
+        // 走 finish 而不是自己写 UPDATE：这条路径同样是一次「落定」，
+        // 监听者要据此把跟着任务走的冗余列（素材状态）拉回未提取。
+        // 漏掉它，用户取消一个排队中的提取后会看到素材永远停在「排队中」。
+        finish(id, 'canceled')
         return ok<CancelOutcome>('canceled-immediately')
       }
 
