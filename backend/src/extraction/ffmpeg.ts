@@ -89,8 +89,9 @@ function run(args: string[], options: RunOptions = {}): Promise<Result<string>> 
         return
       }
       // ffmpeg 的报错信息全在 stderr 末尾几行，摘出来给用户看。
-      // 同时也把完整 stderr 放进 details：`probeDurationMs` 靠非 0 退出
-      // 这条路径拿文件头，它需要的是被摘掉的更早那几行。
+      // 同时也把完整 stderr 放进 details：`probeMedia` 靠非 0 退出
+      // 这条路径拿文件头（不带输出参数时 ffmpeg 必然非 0 退出），
+      // 它需要的正是被摘掉的更早那几行。
       const tail = stderr.trim().split('\n').slice(-3).join(' ').trim()
       resolve(
         err('EXTRACTION_FAILED', `ffmpeg 退出码 ${code}${tail ? `：${tail}` : ''}`, {
@@ -103,36 +104,77 @@ function run(args: string[], options: RunOptions = {}): Promise<Result<string>> 
 }
 
 /**
- * 从 ffmpeg 的 stderr 里读时长。
+ * 从 ffmpeg 的 stderr 里读时长与流信息。
  *
  * 不是为了省一次调用而"顺手解析"——`ffmpeg-static` **只带 ffmpeg，
  * 不带 ffprobe**，所以没有第二个选择。格式是稳定的：
- * `  Duration: 00:00:09.70, start: ...`
+ *
+ *     Duration: 00:00:09.70, start: 0.000000, bitrate: 46 kb/s
+ *     Stream #0:0[0x1](und): Video: h264 (...), 320x240, 10 fps
+ *     Stream #0:1(und): Audio: aac (LC), 44100 Hz, stereo, fltp
+ *
+ * 流的写法有若干变体（`#0:0`、`#0:0:1`、带 `[0x1]` 与 `(und)` 后缀），
+ * 所以匹配写成宽松的：行首是 `Stream #`、中间随便、后面是 `: Audio:`。
  */
 const DURATION = /Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d{1,3})/
 
-export function parseDurationMs(stderr: string): number | null {
-  const m = DURATION.exec(stderr)
-  if (!m) return null
-  const [, h, min, s, frac] = m
-  return (
-    Number(h) * 3_600_000 +
-    Number(min) * 60_000 +
-    Number(s) * 1_000 +
-    Number(frac!.padEnd(3, '0').slice(0, 3))
-  )
+const STREAM_LINE = /^\s*Stream #\d+:\d+.*?:\s*(Audio|Video|Subtitle)\s*:/gm
+
+export interface MediaInfo {
+  durationMs: number | null
+  hasAudio: boolean
+  hasVideo: boolean
 }
 
-/** 读素材时长。失败返回 null——时长只用于展示与进度估算，不值得让整条链路失败。 */
-export async function probeDurationMs(input: string): Promise<number | null> {
-  // 故意不给输出参数：ffmpeg 会先打印文件头（含 Duration），随后因为
-  // 「没有指定输出文件」以非 0 退出。**这正是想要的**——只读文件头，
-  // 不去解码整条音轨。给个 -f null - 的话，两小时的视频就要解码两小时
-  // 才能拿到一个本来在第一秒就知道的数字。
+export function parseMediaInfo(stderr: string): MediaInfo {
+  const m = DURATION.exec(stderr)
+  const durationMs = m
+    ? Number(m[1]) * 3_600_000 +
+      Number(m[2]) * 60_000 +
+      Number(m[3]) * 1_000 +
+      Number(m[4]!.padEnd(3, '0').slice(0, 3))
+    : null
+
+  // 用 matchAll 而不是 test：一个文件可能有多条流，`hasAudio` 要看全部。
+  // 只测第一条会漏掉「视频流在前、音频流在后」这个最常见的排列。
+  let hasAudio = false
+  let hasVideo = false
+  for (const match of stderr.matchAll(STREAM_LINE)) {
+    if (match[1] === 'Audio') hasAudio = true
+    if (match[1] === 'Video') hasVideo = true
+  }
+
+  return { durationMs, hasAudio, hasVideo }
+}
+
+/**
+ * 读素材的时长与流的构成。
+ *
+ * 只在文件头里读，不解码——给个 `-f null -` 的话，两小时的视频就要解码
+ * 两小时，才能拿到一个本来在第一秒就知道的数字。
+ *
+ * **`hasAudio` 是这条链路的前提判断。** 没有音轨的视频去抽音轨，ffmpeg 会
+ * 以非 0 退出。若把它当成「提取失败」，用户会看到一条本该是「这个视频没有
+ * 声音，已提取、文本为空」的素材被标成红色错误，还得去重试一个永远不会
+ * 成功的东西。先问一句「有没有音轨」，这件事就从"解析报错文本"变成了
+ * 一个明确的分支。
+ *
+ * 探测本身失败（文件损坏、编码不支持）返回 null——此时调用方按失败处理，
+ * 因为那确实需要重试。
+ */
+export async function probeMedia(input: string): Promise<MediaInfo | null> {
+  // 故意不给输出参数：ffmpeg 会先打印文件头，随后因为「没有指定输出文件」
+  // 以非 0 退出。**这正是想要的**——所以我们两条路径都要看。
   const result = await run(['-hide_banner', '-i', input])
-  if (result.ok) return parseDurationMs(result.value)
-  // 非 0 退出是这条路径的常态，所以不能把 stderr 丢掉。
-  return parseDurationMs(result.error.details?.['stderr'] as string | undefined ?? '')
+  const stderr = result.ok
+    ? result.value
+    : ((result.error.details?.['stderr'] as string | undefined) ?? '')
+
+  const info = parseMediaInfo(stderr)
+  // 连时长和流一个都没解析出来，说明这压根不是媒体文件，
+  // 而不是「一个没有音轨的媒体文件」。
+  if (info.durationMs === null && !info.hasAudio && !info.hasVideo) return null
+  return info
 }
 
 /**
