@@ -337,3 +337,492 @@ code {
 .callout li {
   margin-bottom: 4px;
 }
+
+/* ---------- 面板 ---------- */
+
+.panel {
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  margin-bottom: 20px;
+}
+
+.panel-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel-head .panel-title {
+  margin: 0;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* ---------- 目录列表 ---------- */
+
+.dir-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dir-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.dir-info {
+  min-width: 0;
+}
+
+.dir-name {
+  font-weight: 600;
+}
+
+.dir-path {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+}
+
+.dir-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.dir-form,
+.filters,
+.tag-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dir-form {
+  margin-top: 4px;
+}
+
+.dir-form input,
+.filters input,
+.filters select,
+.tag-form input {
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.dir-form input:focus,
+.filters input:focus,
+.filters select:focus,
+.tag-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dir-form input:first-child {
+  flex: 1 1 260px;
+}
+
+.dir-form input:nth-child(2) {
+  flex: 0 1 180px;
+}
+
+.filters {
+  margin-bottom: 14px;
+}
+
+.filters input {
+  flex: 1 1 200px;
+}
+
+/* ---------- 扫描进度 ---------- */
+
+.scan-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scan-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+/* 总数为 0 时长度无从谈起，用呼吸条表示「在动但说不准还剩多少」，
+   比一条卡在 0% 的空槽诚实——后者看起来像卡死了。 */
+.progress-fill.is-indeterminate {
+  width: 35%;
+  animation: progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0% {
+    margin-left: -35%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+/* ---------- 素材表 ---------- */
+
+.asset-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.asset-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.asset-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.asset-table tbody tr {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.asset-table tbody tr:hover {
+  background: var(--panel-hover);
+}
+
+.asset-table tbody tr.is-selected {
+  background: var(--accent-soft);
+}
+
+.path-cell {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12.5px;
+}
+
+/* ---------- 状态徽标 ---------- */
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.badge-none,
+.badge-job-queued {
+  color: var(--muted);
+}
+
+.badge-done,
+.badge-job-succeeded {
+  color: var(--ok);
+  border-color: #234a2c;
+  background: rgba(63, 185, 80, 0.09);
+}
+
+.badge-partial,
+.badge-job-running,
+.badge-running {
+  color: var(--accent);
+  border-color: #2a3a52;
+  background: var(--accent-soft);
+}
+
+.badge-pending,
+.badge-job-canceled {
+  color: var(--warn);
+  border-color: #4a3a1f;
+  background: rgba(224, 163, 58, 0.09);
+}
+
+.badge-failed,
+.badge-job-failed {
+  color: var(--danger);
+  border-color: #4a2a2f;
+  background: rgba(242, 85, 90, 0.09);
+}
+
+/* ---------- 标签 ---------- */
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12.5px;
+}
+
+.tag-chip-static {
+  padding-right: 9px;
+  margin-right: 4px;
+}
+
+.tag-remove {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tag-remove:hover:not(:disabled) {
+  background: none;
+  color: var(--danger);
+}
+
+.tag-form input {
+  flex: 1 1 180px;
+}
+
+/* ---------- 详情面板 ---------- */
+
+.detail-panel {
+  margin-top: 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.detail-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-list {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 6px 14px;
+  margin: 0 0 16px;
+  font-size: 13.5px;
+}
+
+.detail-list dt {
+  color: var(--muted);
+}
+
+.detail-list dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.detail-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.detail-subtitle {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* ---------- 检索 ---------- */
+
+.search-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.search-form input {
+  flex: 1;
+  padding: 10px 13px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+
+.search-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.search-form input::placeholder {
+  color: #5c6478;
+}
+
+.result-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 18px 0 12px;
+  font-size: 13.5px;
+  color: var(--muted);
+}
+
+.term-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.result-card {
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.result-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.result-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-size: 12.5px;
+}
+
+.result-sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12.5px;
+}
+
+.badge-source {
+  color: var(--accent);
+  border-color: #2a3a52;
+  background: var(--accent-soft);
+}
+
+.snippet {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--border);
+  border-radius: 0 8px 8px 0;
+  background: var(--bg);
+  font-size: 13.5px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+/* 命中词的强调必须够显眼：用户扫一眼结果时，靠的就是它 */
+.snippet mark {
+  padding: 0 2px;
+  border-radius: 3px;
+  background: rgba(224, 163, 58, 0.28);
+  color: var(--text);
+}
+
+.snippet-time {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+}
