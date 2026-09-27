@@ -7,6 +7,7 @@ import { frontendDistDir } from './config.js'
 import { type CredentialsStore, credentialsStore } from './credentials/store.js'
 import type { Db } from './db/index.js'
 import type { JobQueue } from './jobs/queue.js'
+import { createExtractionRouter } from './routes/extraction.js'
 import { createLibraryRouter } from './routes/library.js'
 import { createSearchRouter } from './routes/search.js'
 import { createSettingsRouter } from './routes/settings.js'
@@ -57,7 +58,13 @@ export function createApp(options: AppOptions = {}) {
     api.use('/search', createSearchRouter(options.db))
   }
 
-  // 后续路由（extraction / polish）在此挂载
+  // 提取只读数据库与被解析的素材文件，同样不需要队列——
+  // 字幕解析是毫秒级操作，不走后台任务（importer.ts 里有说明）
+  if (options.db) {
+    api.use('/extraction', createExtractionRouter(options.db))
+  }
+
+  // 后续路由（polish）在此挂载
 
   app.use('/api', api)
 

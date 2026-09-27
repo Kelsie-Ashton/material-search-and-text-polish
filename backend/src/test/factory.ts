@@ -41,6 +41,7 @@ export function createAsset(
     fileName: string
     ext: string
     kind: string
+    sizeBytes: number
     fingerprint: string
   }> = {},
 ): AssetRow {
@@ -62,7 +63,7 @@ export function createAsset(
       fileName,
       overrides.ext ?? '.mp4',
       overrides.kind ?? 'video',
-      1024,
+      overrides.sizeBytes ?? 1024,
       now,
       overrides.fingerprint ?? 'fp-0001',
       now,
