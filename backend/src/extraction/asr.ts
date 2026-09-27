@@ -2,7 +2,6 @@ import { env, pipeline, type AutomaticSpeechRecognitionPipeline } from '@hugging
 
 import { asrDtype, asrModel, hfEndpoint, modelsDir } from '../config.js'
 import { err, ok, type Result } from '../shared/result.js'
-import { toSimplified } from './chinese.js'
 
 /**
  * 中文语音转写（任务 5.3 / 5.4）。
@@ -16,7 +15,9 @@ import { toSimplified } from './chinese.js'
  *    而有些网络直连它极慢（本项目开发机实测 0.07 MB/s，388 MB 要 92 分钟）。
  *    它**不认 `HF_ENDPOINT` 环境变量**（v4.3.0 实测），所以这里显式赋给
  *    `env.remoteHost`。
- * 2. **输出是繁体。** 必须转简体，且 `initial_prompt` 偏置无效——见 chinese.ts。
+ * 2. **输出是繁体。** 必须转换，且 `initial_prompt` 偏置无效——见 chinese.ts。
+ *    但转换**不在本模块做**：往哪个方向转是用户偏好，这里拿不到也不该拿到。
+ *    本模块只管「把模型输出解析成段落」，转换在落库那一刻统一发生（persist.ts）。
  * 3. **模型加载很慢（首次含下载），绝不能每个素材加载一次。** 这里做进程内
  *    单例，且**把并发加载合并成同一个 Promise**：用户连点两次或队列并发时，
  *    否则会同时加载两份模型，内存直接翻倍。
@@ -166,8 +167,14 @@ export async function transcribeAudio(
  * 它的返回类型在有无 chunks 时不同，且 `timestamp` 可能是 `[null, null]`，
  * 所以这里逐字段防御——**不要相信模型一定给得出时间**。
  *
+ * **本函数不做繁简转换。** 它一度在这里调 `toSimplified`，现在不了：
+ * 字形是**用户偏好**（设置页可选简或繁），而这里拿不到偏好，也不该拿到。
+ * 转换统一发生在落库那一刻（persist.ts）——那是唯一的写入点。
+ * 留在这里的后果是双向的：用户选繁体时，这里先转简、落库再转繁，
+ * 一次多余的往返；而简↔繁并非逐字可逆，还可能改坏原文。
+ *
  * 导出是为了能直接测：跑通它不需要下载 238 MB 的模型，
- * 而把模型输出解析错（时间轴错位、繁体没转）恰恰是这里最容易出的问题。
+ * 而把模型输出解析错（时间轴错位、空段落混进结果）恰恰是这里最容易出的问题。
  */
 export function toSegments(output: unknown): TranscriptSegment[] {
   // 上游换返回结构（或干脆返回 null）时，宁可得到空结果也不要抛——
@@ -179,7 +186,7 @@ export function toSegments(output: unknown): TranscriptSegment[] {
   if (chunks.length === 0) {
     // 短音频（不到一个窗口）可能只给 text 不给 chunks。
     // 这时不能返回空数组——那等于把用户的内容丢掉了。
-    const text = toSimplified(asText(result.text).trim())
+    const text = asText(result.text).trim()
     return text === '' ? [] : [{ text, startMs: null, endMs: null }]
   }
 
@@ -190,7 +197,7 @@ export function toSegments(output: unknown): TranscriptSegment[] {
 
     // 静音处模型经常吐出空串或纯空格。留着会让界面出现一排空行，
     // 检索片段也可能命中一个没有内容的段落。
-    const text = toSimplified(asText(chunk.text).trim())
+    const text = asText(chunk.text).trim()
     if (text === '') continue
 
     // `timestamp` 可能是 [null, null]，也可能整个字段缺失。

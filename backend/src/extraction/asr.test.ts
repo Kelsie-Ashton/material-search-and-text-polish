@@ -6,12 +6,16 @@ import { toSegments } from './asr.js'
  * 转写输出解析的测试。
  *
  * 为什么单独测这一层：跑通它**不需要下载 238 MB 的模型**，而把模型输出
- * 解析错（时间轴错位、繁简没转、空段落混进结果）恰恰是这里最容易出的问题。
+ * 解析错（时间轴错位、空段落混进结果）恰恰是这里最容易出的问题。
  * 模型本身的行为用一次性的人工验证去确认，不放进每次都要跑的测试套件——
  * 否则换台机器、没网、模型改版都会让测试红，而红的还不是我们的代码。
  *
  * 夹具照 Transformers.js 的 `return_timestamps: true` 真实返回结构写：
  * `{ text, chunks: [{ timestamp: [起, 止], text }] }`，时间单位是**秒**。
+ *
+ * **注意夹具保留繁体。** 这一层刻意不做繁简转换——往哪个方向转是用户偏好，
+ * 由落库那一刻统一处理（persist.ts）。若哪天有人"顺手"在这里加回转换，
+ * 下面的断言会红：它们断言的是**模型输出的原样**。
  */
 
 describe('转写输出解析', () => {
@@ -25,18 +29,20 @@ describe('转写输出解析', () => {
     })
 
     expect(segments).toEqual([
-      { text: '今天我们来探店', startMs: 0, endMs: 2500 },
-      { text: '这家火锅店', startMs: 2500, endMs: 6000 },
+      { text: '今天我們來探店', startMs: 0, endMs: 2500 },
+      { text: '這家火鍋店', startMs: 2500, endMs: 6000 },
     ])
   })
 
-  it('顺手把繁体转成简体', () => {
-    // 模型输出的默认就是繁体，转不转在这一层完成——用户拿到的必须是简体。
+  it('原样保留模型输出的字形，不擅自转换', () => {
+    // 这一层不认识「用户偏好」，任何方向的转换在这里都是错的：
+    // 用户选繁体时，这里先转简、落库再转繁，是一次多余的往返，
+    // 而简↔繁并非逐字可逆，还可能改坏原文。
     const segments = toSegments({
       chunks: [{ timestamp: [0, 1], text: '鴨腸和消費' }],
     })
 
-    expect(segments[0]?.text).toBe('鸭肠和消费')
+    expect(segments[0]?.text).toBe('鴨腸和消費')
   })
 
   it('时间戳缺失时保留段落、时间为空', () => {
@@ -72,7 +78,7 @@ describe('转写输出解析', () => {
     // 这时不能返回空数组——那等于把用户的内容丢掉了。
     const segments = toSegments({ text: '  短音頻的整段文字  ' })
 
-    expect(segments).toEqual([{ text: '短音频的整段文字', startMs: null, endMs: null }])
+    expect(segments).toEqual([{ text: '短音頻的整段文字', startMs: null, endMs: null }])
   })
 
   it('空输出得到空数组而不是一个空段落', () => {

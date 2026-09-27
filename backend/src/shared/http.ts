@@ -47,6 +47,9 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   EXTRACTION_ENGINE_UNAVAILABLE: 503,
   EXTRACTION_FFMPEG_FAILED: 500,
   EXTRACTION_NO_CONTENT: 422,
+  // 409 而不是 500：用户主动停止不是服务端出错，
+  // 用一个 5xx 会让日志里出现一条查不出原因的「服务端错误」。
+  EXTRACTION_CANCELLED: 409,
   EXTRACTION_FAILED: 500,
 
   JOB_NOT_FOUND: 404,

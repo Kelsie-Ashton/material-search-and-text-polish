@@ -1,11 +1,16 @@
 import fs from 'node:fs'
 
-import { type Db, inTransaction } from '../db/index.js'
-import { type AssetDetail, findAsset } from '../library/assets.js'
+import type { Db } from '../db/index.js'
+import { findAsset } from '../library/assets.js'
 import { err, ok, type Result } from '../shared/result.js'
-import type { TextScript } from '../shared/text-script.js'
 import { readTextScript } from '../settings/preferences.js'
-import { convertScript } from './chinese.js'
+import {
+  countSegments,
+  engineLabel,
+  findCachedRun,
+  markFailed,
+  persistSegments,
+} from './persist.js'
 import { SUBTITLE_EXTENSIONS, decodeSubtitleText, isSubtitleExtension, parseSubtitle } from './subtitle.js'
 
 /**
@@ -52,75 +57,6 @@ export interface ImportSubtitleResult {
   empty: boolean
 }
 
-interface RunRow {
-  id: number
-}
-
-/**
- * 记录一次失败的提取。
- *
- * 失败也要留下 `extraction_runs` 行：用户看到「提取失败」时，
- * 下一步一定是问「为什么」。原因必须落在库里，而不是只回给这一次请求。
- */
-function markFailed(db: Db, asset: AssetDetail, label: string, code: string, message: string): void {
-  const now = Date.now()
-  inTransaction(db, () => {
-    const run = db
-      .prepare(
-        `INSERT INTO extraction_runs
-           (asset_id, fingerprint, status, engine_versions, error_code, error_message, started_at, finished_at)
-         VALUES (?, ?, 'failed', ?, ?, ?, ?, ?)`,
-      )
-      .run(asset.id, asset.fingerprint, label, code, message, now, now)
-
-    db.prepare(
-      `INSERT INTO extraction_run_sources (run_id, source, status, segment_count, error_code, error_message)
-       VALUES (?, ?, 'failed', 0, ?, ?)`,
-    ).run(run.lastInsertRowid, SOURCE, code, message)
-
-    db.prepare(
-      `UPDATE assets SET extract_status = 'failed', extract_error = ?, updated_at = ? WHERE id = ?`,
-    ).run(message, now, asset.id)
-  })
-}
-
-/**
- * 本次提取的「引擎版本」标签，同时也是缓存键的一部分。
- *
- * **字形必须进来。** 落库的文本会随用户偏好变（简体 / 繁体），
- * 所以「同一份文件、同一个解析器版本」并不保证产出同一份文本。
- * 若只按 PARSER_VERSION 判缓存，用户把偏好从简体改成繁体再点提取，
- * 会命中旧缓存、拿到简体——**设置改了却毫无反应**，
- * 而且不报任何错，是最难查的那类问题。
- */
-function engineLabel(script: TextScript): string {
-  return `${PARSER_VERSION}+${script}`
-}
-
-/**
- * 指纹缓存：文件没变、解析器版本与字形偏好都没变、且上次跑成功了，就不必重来。
- *
- * 这不只是省时间——**重新导入会先删掉旧段落再写入**，无谓地重跑一次
- * 就多一次「中途失败导致文本丢失」的机会。
- */
-function findCachedRun(db: Db, asset: AssetDetail, label: string): number | null {
-  const row = db
-    .prepare(
-      `SELECT id FROM extraction_runs
-        WHERE asset_id = ? AND fingerprint = ? AND status = 'succeeded' AND engine_versions = ?
-        ORDER BY id DESC LIMIT 1`,
-    )
-    .get(asset.id, asset.fingerprint, label) as RunRow | undefined
-  return row?.id ?? null
-}
-
-function countSegments(db: Db, assetId: number): number {
-  const row = db
-    .prepare('SELECT COUNT(*) AS n FROM asset_text_segments WHERE asset_id = ?')
-    .get(assetId) as { n: number }
-  return row.n
-}
-
 export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtitleResult> {
   const asset = findAsset(db, assetId)
   if (!asset) return err('ASSET_NOT_FOUND', `素材不存在（id=${assetId}）`, { id: assetId })
@@ -135,11 +71,11 @@ export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtit
 
   // 落库前先读偏好。**这一步必须在缓存判定之前**——它参与缓存键。
   const script = readTextScript(db)
-  const label = engineLabel(script)
+  const label = engineLabel(PARSER_VERSION, script)
 
   if (asset.sizeBytes > MAX_SUBTITLE_BYTES) {
     const message = `字幕文件过大（${Math.round(asset.sizeBytes / 1024 / 1024)} MB），已跳过`
-    markFailed(db, asset, label, 'EXTRACTION_FAILED', message)
+    markFailed(db, asset, { label, source: SOURCE, code: 'EXTRACTION_FAILED', message })
     return err('EXTRACTION_FAILED', message, { id: assetId, sizeBytes: asset.sizeBytes })
   }
 
@@ -162,66 +98,25 @@ export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtit
     // 文件在磁盘上被删了、被移走了、或没有读权限——这三种对用户来说是
     // 不同的问题，但都表现为「读不到」，把系统给的原文带上更好排查。
     const message = `无法读取字幕文件：${error instanceof Error ? error.message : String(error)}`
-    markFailed(db, asset, label, 'EXTRACTION_FAILED', message)
+    markFailed(db, asset, { label, source: SOURCE, code: 'EXTRACTION_FAILED', message })
     return err('EXTRACTION_FAILED', message, { id: assetId, path: asset.path })
   }
 
   const cues = parseSubtitle(content, asset.ext)
-  const now = Date.now()
-
-  inTransaction(db, () => {
-    // 重新导入是**替换**而非追加：旧段落必须清掉，否则改过字幕再导入一次，
-    // 检索会把新旧两份文本都命中，用户看到重复且互相矛盾的片段。
-    db.prepare('DELETE FROM asset_text_segments WHERE asset_id = ?').run(assetId)
-
-    const run = db
-      .prepare(
-        `INSERT INTO extraction_runs
-           (asset_id, fingerprint, status, engine_versions, started_at, finished_at)
-         VALUES (?, ?, 'succeeded', ?, ?, ?)`,
-      )
-      .run(asset.id, asset.fingerprint, label, now, now)
-
-    db.prepare(
-      `INSERT INTO extraction_run_sources (run_id, source, status, segment_count)
-       VALUES (?, ?, 'succeeded', ?)`,
-    ).run(run.lastInsertRowid, SOURCE, cues.length)
-
-    // 段落写入由 fts_segments 上的 AFTER INSERT 触发器同步进全文索引，
-    // 这里不需要（也不能）手动维护 FTS。
-    const insert = db.prepare(
-      `INSERT INTO asset_text_segments
-         (asset_id, run_id, source, ordinal, text, start_ms, end_ms, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    cues.forEach((cue, index) => {
-      insert.run(
-        asset.id,
-        run.lastInsertRowid,
-        SOURCE,
-        index,
-        // 唯一一处字形转换。**落库的文本必须是转换后的**，
-        // 因为 FTS 索引由触发器跟着这一行同步——索引里存的就是这里写下的字，
-        // 事后再改就没机会了（除非整段重写）。
-        convertScript(cue.text, script),
-        cue.startMs,
-        cue.endMs,
-        now,
-      )
-    })
-
-    db.prepare(
-      `UPDATE assets SET extract_status = 'done', extract_error = NULL, extracted_at = ?, updated_at = ?
-        WHERE id = ?`,
-    ).run(now, now, asset.id)
+  const segmentCount = persistSegments(db, asset, {
+    source: SOURCE,
+    label,
+    script,
+    segments: cues,
   })
 
   return ok({
     assetId,
     status: 'done',
-    segmentCount: cues.length,
+    segmentCount,
     reused: false,
-    empty: cues.length === 0,
+    // 空字幕是「已提取、无内容」，不是失败——前者不需要重试，后者需要
+    empty: segmentCount === 0,
   })
 }
 
