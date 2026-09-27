@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../app.js'
 import type { Db } from '../db/index.js'
+import { createJobQueue, type JobQueue } from '../jobs/queue.js'
 import { createAsset, createDirectory } from '../test/factory.js'
 import { createTestDb } from '../test/temp-db.js'
 
@@ -32,6 +33,7 @@ const SRT = [
 describe('提取路由', () => {
   let db: Db
   let app: ReturnType<typeof createApp>
+  let queue: JobQueue
   let workDir: string
   let directoryId: number
 
@@ -49,7 +51,10 @@ describe('提取路由', () => {
 
   beforeEach(() => {
     db = createTestDb()
-    app = createApp({ db })
+    // 队列只入队、不启动消费：这里的测试关心的是「请求有没有正确地把活交出去」，
+    // 真跑转写要下载模型（见 media.test.ts 的说明）。任务的执行另有用例覆盖。
+    queue = createJobQueue(db)
+    app = createApp({ db, jobQueue: queue })
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'extraction-route-'))
     directoryId = createDirectory(db).id
   })
@@ -74,7 +79,8 @@ describe('提取路由', () => {
     it('未支持的类型返回 501 并说明哪些格式现在可用', async () => {
       // 用户点了「提取文字」却拿到 404「接口不存在」，会以为程序坏了。
       // 必须让他知道：这个类型要等下一批，而字幕现在就能导。
-      const asset = createAsset(db, directoryId, { fileName: '视频.mp4', ext: '.mp4' })
+      // 图片仍是这条路径——OCR 属于任务 5.1/5.2，尚未实现。
+      const asset = createAsset(db, directoryId, { fileName: '封面.png', ext: '.png', kind: 'image' })
 
       const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
 
@@ -83,7 +89,33 @@ describe('提取路由', () => {
       expect(res.body.error.message).toContain('.ass')
       expect(res.body.error.message).toContain('下一批')
       // 告诉前端是哪个扩展名没被支持，界面才好把这句话写具体
-      expect(res.body.error.details).toMatchObject({ ext: '.mp4' })
+      expect(res.body.error.details).toMatchObject({ ext: '.png' })
+    })
+
+    it('音视频返回 202 与任务 id，而不是傻等它跑完', async () => {
+      // 转写一个素材要几分钟到几十分钟。若在这里同步执行，一次请求会挂到
+      // 浏览器/代理超时，用户拿到的是一个失败的请求——但活其实还在后台干。
+      const asset = createAsset(db, directoryId, { fileName: '探店.mp4', ext: '.mp4' })
+
+      const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
+
+      expect(res.status).toBe(202)
+      expect(res.body.ok).toBe(true)
+      expect(typeof res.body.value.jobId).toBe('number')
+    })
+
+    it('入队的任务带上素材 id，好让 worker 知道该处理谁', async () => {
+      const asset = createAsset(db, directoryId, { fileName: '探店.mp4', ext: '.mp4' })
+
+      await request(app).post(`/api/extraction/assets/${asset.id}`)
+
+      // 不断言 status：入队会立刻踢一下队列，它可能已经跑完了。
+      // 状态的流转是队列自己的用例该管的事，这里只问「活交给谁了」。
+      const row = db
+        .prepare("SELECT type, target_id FROM jobs WHERE type = 'extract' ORDER BY id DESC")
+        .get() as { type: string; target_id: number }
+      expect(row.type).toBe('extract')
+      expect(row.target_id).toBe(asset.id)
     })
 
     it('素材不存在返回 404 而不是 500', async () => {

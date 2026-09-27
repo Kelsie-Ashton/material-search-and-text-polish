@@ -62,10 +62,11 @@ export function createApp(options: AppOptions = {}) {
     api.use('/search', createSearchRouter(options.db))
   }
 
-  // 提取只读数据库与被解析的素材文件，同样不需要队列——
-  // 字幕解析是毫秒级操作，不走后台任务（importer.ts 里有说明）
+  // 提取需要队列，但不是硬依赖：字幕解析是毫秒级的同步操作，没有队列也能用；
+  // 只有音视频转写才要求队列（它跑几分钟，不可能挂在一次请求里）。
+  // 所以队列可选传入，缺失时那一条路径如实报「未启用」（extraction.ts 里有说明）
   if (options.db) {
-    api.use('/extraction', createExtractionRouter(options.db))
+    api.use('/extraction', createExtractionRouter(options.db, options.jobQueue))
   }
 
   // 后续路由（polish）在此挂载

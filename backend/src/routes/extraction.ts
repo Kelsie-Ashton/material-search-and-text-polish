@@ -2,20 +2,27 @@ import { Router } from 'express'
 
 import type { Db } from '../db/index.js'
 import { importSubtitleText, listSegments } from '../extraction/importer.js'
+import { isMediaKind } from '../extraction/media.js'
 import { SUBTITLE_EXTENSIONS, isSubtitleExtension } from '../extraction/subtitle.js'
 import { findAsset } from '../library/assets.js'
+import type { JobQueue } from '../jobs/queue.js'
 import { sendResult } from '../shared/http.js'
-import { err } from '../shared/result.js'
+import { err, ok } from '../shared/result.js'
 
 /**
  * 文字提取路由。
  *
- * 目前只实现了一条路径：**字幕文件的直接解析导入**。它不需要任何模型，
- * 因此可以先于语音转写与 OCR 交付（design.md 决策 12）。
+ * 两条路径，**按「要花多久」分派**：
  *
- * 其余类型的入口**保留且如实报错**，而不是不挂载：用户点了「提取文字」
- * 却拿到 404「接口不存在」，会以为是程序坏了；拿到一句「这个类型的提取
- * 需要本地识别引擎，下一批提供」才知道该等什么。
+ * 1. **字幕文件**——读一个文本文件解析，毫秒级，**同步返回结果**。
+ *    为它套一层任务队列只会让用户多点几次刷新。
+ * 2. **音频 / 视频**——要抽音轨再跑语音模型，几分钟到几十分钟，**入队**。
+ *    HTTP 请求挂不了那么久（浏览器、代理、Node 的默认超时都不同意），
+ *    所以这里只返回任务 id，进度与结果由任务接口查（任务轮询接口见任务 5.7）。
+ *
+ * 图片仍如实报「未实现」而不是不挂载：用户点了「提取文字」却拿到 404
+ * 「接口不存在」，会以为是程序坏了；拿到一句「这个类型的提取需要本地识别
+ * 引擎，下一批提供」才知道该等什么（design.md 决策 12）。
  */
 
 /** 路径参数解析成正整数，失败返回 null。 */
@@ -26,7 +33,7 @@ function parseId(raw: string | undefined): number | null {
   return value
 }
 
-export function createExtractionRouter(db: Db): Router {
+export function createExtractionRouter(db: Db, queue?: JobQueue): Router {
   const router = Router()
 
   router.post('/assets/:id', (req, res) => {
@@ -43,9 +50,28 @@ export function createExtractionRouter(db: Db): Router {
     }
 
     // 提取按文件类型分派。字幕文件的文字本就现成，直接解析；
-    // 其余类型要「认出」文字，需要本地识别引擎。
+    // 音视频要「认出」文字，得跑本地语音模型，因此入队。
     if (isSubtitleExtension(asset.ext)) {
       sendResult(res, importSubtitleText(db, id))
+      return
+    }
+
+    if (isMediaKind(asset.kind)) {
+      if (!queue) {
+        // 队列没接上（例如某个测试只关心别的路由）。如实说清楚，
+        // 而不是退回同步执行——那会让一次请求挂上几十分钟。
+        sendResult(res, err('NOT_IMPLEMENTED', '提取任务队列未启用'), 501)
+        return
+      }
+
+      const job = queue.enqueue('extract', id)
+      if (!job.ok) {
+        sendResult(res, job)
+        return
+      }
+      // 202 而不是 200：活儿还没干完，返回的只是「受理了」。
+      // 用 200 会让调用方以为拿到的就是提取结果。
+      sendResult(res, ok({ jobId: job.value.id }), 202)
       return
     }
 
