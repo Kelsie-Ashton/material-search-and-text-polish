@@ -57,12 +57,25 @@ export const port = Number(process.env['PORT'] ?? 5174)
  */
 export const host = '127.0.0.1'
 
-/** 受支持的素材扩展名 → 素材大类 */
+/**
+ * 受支持的素材扩展名 → 素材大类。
+ *
+ * 这张表描述的是**文件类型**（怎么读这个文件），不是**题材**（内容讲什么）。
+ * 「动漫 / 漫画 / 剧 / 游戏」这类题材**不得**出现在本表或任何代码常量里：
+ * 题材是用户自己的词汇，边界因人而异且会不断长出新词（纪录片、综艺、Vlog、
+ * 播客、访谈……），代码里穷举不完，列不全的枚举就是坏枚举。它已经有了正确
+ * 的归宿——**标签**（见 `tags/service.ts`），由用户自建、参与检索、跨素材复用。
+ *
+ * 这里有一层结构性保证：`AssetKind` 由本表的键推导，想新增一个题材键，
+ * 就必须为它编出一组描述**文件类型**的扩展名——编不出来，就说明它不属于这里。
+ */
 export const SUPPORTED_EXTENSIONS = {
   video: ['.mp4', '.mov', '.mkv', '.avi', '.webm', '.flv', '.wmv', '.m4v'],
   audio: ['.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg', '.wma'],
   image: ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'],
-  text: ['.txt', '.md', '.markdown', '.srt', '.vtt', '.json', '.csv'],
+  // 字幕文件的文字本就现成，只是包了一层时间轴与样式标记，不需要任何识别引擎。
+  // 它们走「直接解析导入」而非 OCR/ASR——见 design.md 决策 12。
+  text: ['.txt', '.md', '.markdown', '.srt', '.vtt', '.ass', '.ssa', '.json', '.csv'],
 } as const
 
 export type AssetKind = keyof typeof SUPPORTED_EXTENSIONS
