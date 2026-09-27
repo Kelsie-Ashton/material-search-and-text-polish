@@ -83,6 +83,16 @@ export interface ExtractMediaResult {
   durationMs: number | null
 }
 
+/**
+ * 链路上可被观察的阶段。
+ *
+ * 分四段而不是只报「正在提取」：转写要几十分钟，一句不变的提示
+ * 在用户看来和卡死没有区别。各段耗时差着两三个数量级——
+ * 探测与落库是毫秒级，抽音轨是几十秒，转写是几十分钟——
+ * 用户看到「正在转写」才知道现在不该关掉它。
+ */
+export type ExtractPhase = 'probing' | 'extracting-audio' | 'transcribing' | 'persisting'
+
 export interface ExtractMediaOptions {
   deps?: Partial<MediaDeps>
   /**
@@ -93,6 +103,8 @@ export interface ExtractMediaOptions {
    * 所以取消的语义是「还没开始重活就停」，而不是「随时丢掉已算出的结果」。
    */
   isCancelled?: () => boolean
+  /** 阶段变化回调。任务队列用它把进度写进 jobs 表，供界面轮询。 */
+  onPhase?: (phase: ExtractPhase) => void
   /** 中间产物（WAV）的落盘位置。测试指向临时目录，避免污染真实的 data/tmp。 */
   workDir?: string
 }
@@ -157,6 +169,7 @@ export async function extractMediaText(
   const deps: MediaDeps = { ...REAL_DEPS, ...options.deps }
 
   // ---------- 探测：有没有音轨 ----------
+  options.onPhase?.('probing')
   const info = await deps.probe(asset.path)
   if (info === null) {
     const message = '无法读取媒体信息，文件可能已损坏或格式不受支持'
@@ -197,6 +210,7 @@ export async function extractMediaText(
   const wavPath = path.join(workDir, `extract-${assetId}-${Date.now()}.wav`)
 
   try {
+    options.onPhase?.('extracting-audio')
     const audio = await deps.extractAudio(asset.path, wavPath)
     if (!audio.ok) {
       markFailed(db, asset, {
@@ -224,6 +238,7 @@ export async function extractMediaText(
       return cancelled(assetId)
     }
 
+    options.onPhase?.('transcribing')
     const transcription = await deps.transcribe(
       { samples: wav.samples, sampleRate: wav.sampleRate },
       { engineLabel: label },
@@ -239,6 +254,7 @@ export async function extractMediaText(
     }
 
     const { segments } = transcription.value
+    options.onPhase?.('persisting')
     const segmentCount = persistSegments(db, asset, {
       source: SOURCE,
       label,

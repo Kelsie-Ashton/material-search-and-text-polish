@@ -1,12 +1,18 @@
 import type { Db } from '../db/index.js'
+import { syncAssetExtractStatus } from '../extraction/asset-status.js'
 import { importSubtitleText } from '../extraction/importer.js'
-import { extractMediaText, isMediaKind, type MediaDeps } from '../extraction/media.js'
+import {
+  extractMediaText,
+  isMediaKind,
+  type ExtractPhase,
+  type MediaDeps,
+} from '../extraction/media.js'
 import { isSubtitleExtension } from '../extraction/subtitle.js'
 import { findAsset } from '../library/assets.js'
 import { findDirectory, markDirectoryScanned } from '../library/directories.js'
 import { scanDirectory, type ScanProgress } from '../library/scanner.js'
-import { err, ok } from '../shared/result.js'
-import type { JobQueue } from './queue.js'
+import { err, ok, type Result } from '../shared/result.js'
+import type { JobContext, JobQueue } from './queue.js'
 
 /**
  * 把业务动作注册成任务处理器。
@@ -45,6 +51,16 @@ export interface HandlerDeps {
   media?: Partial<MediaDeps>
   /** 中间产物目录，测试指向临时目录，避免污染真实的 data/tmp */
   workDir?: string
+}
+
+/** 把链路的内部阶段翻成用户能读懂的一句话。 */
+const PHASE_MESSAGES: Record<ExtractPhase, string> = {
+  probing: '正在检查素材…',
+  'extracting-audio': '正在导出音轨…',
+  // 这一段的措辞要给出预期：它是整条链路上唯一以「十分钟」计的一步，
+  // 用户看到「正在转写」才知道现在不该关掉窗口
+  transcribing: '正在转写语音（最耗时的一步，长素材可能需要十几分钟）…',
+  persisting: '正在写入结果…',
 }
 
 export function registerJobHandlers(queue: JobQueue, db: Db, deps: HandlerDeps = {}): void {
@@ -86,44 +102,38 @@ export function registerJobHandlers(queue: JobQueue, db: Db, deps: HandlerDeps =
    * 队列还顺带给了两件东西：串行（多个素材不会同时抢 CPU 打满机器），
    * 以及取消（用户可以中途放弃一个长视频）。
    */
-  queue.register('extract', async (context) => {
-    const assetId = context.job.targetId
-    if (assetId === null) {
-      return err('VALIDATION_FAILED', '提取任务缺少目标素材')
-    }
-
-    const asset = findAsset(db, assetId)
-    if (!asset) {
-      // 用户点了提取又立刻删掉了素材——可读的提示，不是崩溃
-      return err('ASSET_NOT_FOUND', `素材已被移除（id=${assetId}）`, { id: assetId })
-    }
-
+  async function runExtraction(
+    context: JobContext,
+    assetId: number,
+    ext: string,
+    kind: string,
+  ): Promise<Result<unknown>> {
     // 分派。字幕走解析、音视频走转写、其余如实拒绝。
     //
     // 字幕在路由那边是同步处理的（毫秒级，见 routes/extraction.ts），
     // 正常情况下不会出现在队列里。这里仍然认它，是为了不让「队列里的提取」
     // 与「路由里的提取」变成两套规矩——将来若有「批量重新提取」之类的入口
     // 把字幕也丢进队列，它应当照常工作，而不是得到一句「不是音频或视频」。
-    if (isSubtitleExtension(asset.ext)) {
+    if (isSubtitleExtension(ext)) {
+      context.reportProgress(0, 0, '正在解析字幕…')
       return importSubtitleText(db, assetId)
     }
 
-    if (!isMediaKind(asset.kind)) {
+    if (!isMediaKind(kind)) {
       return err(
         'EXTRACTION_UNSUPPORTED_TYPE',
-        `「${asset.ext}」的文字提取需要本地识别引擎（语音转写 / OCR），尚未提供`,
-        { ext: asset.ext, kind: asset.kind },
+        `「${ext}」的文字提取需要本地识别引擎（语音转写 / OCR），尚未提供`,
+        { ext, kind },
       )
     }
-
-    // 总时长事前不知道（要探测完才知道），所以 total 传 0 表示「未知」，
-    // 界面据此显示不确定进度，而不是一个永远停在 0% 的假进度条。
-    context.reportProgress(0, 0, '正在提取文字…')
 
     const result = await extractMediaText(db, assetId, {
       isCancelled: context.isCancelled,
       deps: deps.media,
       workDir: deps.workDir,
+      // 阶段名直接翻成人话写进任务表。前端一轮询就能看到它，
+      // 而「正在转写」这四个字是用户决定「要不要继续等」的唯一依据。
+      onPhase: (phase) => context.reportProgress(0, 0, PHASE_MESSAGES[phase]),
     })
     if (!result.ok) return result
 
@@ -142,5 +152,30 @@ export function registerJobHandlers(queue: JobQueue, db: Db, deps: HandlerDeps =
         ? `复用上次结果，共 ${segmentCount} 段`
         : `提取完成，共 ${segmentCount} 段`,
     })
+  }
+
+  queue.register('extract', async (context) => {
+    const assetId = context.job.targetId
+    if (assetId === null) {
+      return err('VALIDATION_FAILED', '提取任务缺少目标素材')
+    }
+
+    const asset = findAsset(db, assetId)
+    if (!asset) {
+      // 用户点了提取又立刻删掉了素材——可读的提示，不是崩溃
+      return err('ASSET_NOT_FOUND', `素材已被移除（id=${assetId}）`, { id: assetId })
+    }
+
+    // 任务真的开始跑了，素材状态从「排队中」推进到「提取中」。
+    // 这是唯一由处理器负责的一次同步：它知道「我开始了」，
+    // 而队列在 claim 时并不知道这个 job 对应的是哪张业务表。
+    //
+    // **收尾那一次不在这里做。** 处理器在 finally 里同步时，job 行还是 running
+    // （队列要等 handler 返回后才写终态），推导出来的只会是「提取中」，
+    // 把刚落库的 done / failed 覆盖掉。收尾交给 watchExtractJobs 挂的
+    // 落定回调，理由见 asset-status.ts。
+    syncAssetExtractStatus(db, assetId)
+
+    return runExtraction(context, assetId, asset.ext, asset.kind)
   })
 }
