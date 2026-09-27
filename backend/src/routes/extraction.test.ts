@@ -74,6 +74,9 @@ describe('提取路由', () => {
       expect(res.body.ok).toBe(true)
       expect(res.body.value.status).toBe('done')
       expect(res.body.value.segmentCount).toBe(2)
+      // 两条路径的返回形状不同，调用方必须能分辨自己拿到的是哪一种。
+      // 这个字段是**契约的一部分**，删掉它前端就只能靠「有没有 jobId」去猜。
+      expect(res.body.value.mode).toBe('imported')
     })
 
     it('未支持的类型返回 501 并说明哪些格式现在可用', async () => {
@@ -87,9 +90,25 @@ describe('提取路由', () => {
       expect(res.status).toBe(501)
       expect(res.body.error.code).toBe('NOT_IMPLEMENTED')
       expect(res.body.error.message).toContain('.ass')
-      expect(res.body.error.message).toContain('下一批')
+      expect(res.body.error.message).toContain('OCR')
       // 告诉前端是哪个扩展名没被支持，界面才好把这句话写具体
       expect(res.body.error.details).toMatchObject({ ext: '.png' })
+    })
+
+    it('纯文本文件说的是「要先判定编码」，不是「需要识别引擎」', async () => {
+      // `.txt` 本身就已经是文字，说它需要识别引擎会让人以为连读个 txt 都要下模型。
+      // 它真正的障碍是编码：中文纯文本大量是 GBK，判定错了就是整篇乱码进索引。
+      // 两句话长得像，但对用户来说是完全不同的两件事。
+      const asset = createAsset(db, directoryId, { fileName: '笔记.txt', ext: '.txt', kind: 'text' })
+
+      const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
+
+      expect(res.status).toBe(501)
+      expect(res.body.error.message).toContain('编码')
+      // 断言的是「没有说它需要引擎」这件事本身，而不是「不含『识别引擎』四个字」——
+      // 正确的文案里恰恰有「不需要识别引擎」，按字面去否定会把对的判成错的。
+      expect(res.body.error.message).toContain('不需要识别引擎')
+      expect(res.body.error.message).not.toContain('需要本地识别引擎')
     })
 
     it('音视频返回 202 与任务 id，而不是傻等它跑完', async () => {
@@ -102,6 +121,7 @@ describe('提取路由', () => {
       expect(res.status).toBe(202)
       expect(res.body.ok).toBe(true)
       expect(typeof res.body.value.jobId).toBe('number')
+      expect(res.body.value.mode).toBe('queued')
     })
 
     it('入队的任务带上素材 id，好让 worker 知道该处理谁', async () => {

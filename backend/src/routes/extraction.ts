@@ -52,8 +52,14 @@ export function createExtractionRouter(db: Db, queue?: JobQueue): Router {
 
     // 提取按文件类型分派。字幕文件的文字本就现成，直接解析；
     // 音视频要「认出」文字，得跑本地语音模型，因此入队。
+    //
+    // 两条路径的**返回形状不同**（一条同步给结果，一条只给任务 id），
+    // 而调用方必须能分辨自己拿到的是哪一种。所以两条各自带上 `mode`，
+    // 让这个分派结果写在响应里，而不是让前端靠「有没有 jobId 字段」去猜——
+    // 那种猜法在形状变动时会静默认错，而这正是本文件开头那两条路径的核心区别。
     if (isSubtitleExtension(asset.ext)) {
-      sendResult(res, importSubtitleText(db, id))
+      const imported = importSubtitleText(db, id)
+      sendResult(res, imported.ok ? ok({ mode: 'imported' as const, ...imported.value }) : imported)
       return
     }
 
@@ -79,19 +85,27 @@ export function createExtractionRouter(db: Db, queue?: JobQueue): Router {
 
       // 202 而不是 200：活儿还没干完，返回的只是「受理了」。
       // 用 200 会让调用方以为拿到的就是提取结果。
-      sendResult(res, ok({ jobId: job.value.id, status }), 202)
+      sendResult(res, ok({ mode: 'queued' as const, jobId: job.value.id, status }), 202)
       return
     }
 
-    sendResult(
-      res,
-      err(
-        'NOT_IMPLEMENTED',
-        `${asset.ext} 的文字提取需要本地识别引擎（语音转写 / OCR），将在下一批功能中提供。` +
-          `字幕文件（${SUBTITLE_EXTENSIONS.join(' / ')}）现在就可以直接导入。`,
-        { ext: asset.ext, kind: asset.kind },
-      ),
-    )
+    // 「图片」与「其余纯文本」要走两条不同的说辞，不能共用一句话。
+    //
+    // 图片确实需要识别引擎（OCR），而 OCR 已按评估结论挂起（见 README 的未来规划）。
+    //
+    // 但 `.txt` / `.md` / `.csv` 这些**本身就已经是文字**，说它们「需要识别引擎」
+    // 是错的——用户会以为程序连读个 txt 都要下模型。它们的真实障碍是另一件事：
+    // 中文纯文本大量是 GBK 编码，判定错了就是一整篇乱码进索引，比不导更糟。
+    const message =
+      asset.kind === 'text'
+        ? `「${asset.ext}」本身已经是文字，不需要识别引擎，但把它读进索引要先判定编码` +
+          `（中文纯文本常有 GBK），这一步将在下一批功能中提供。` +
+          `现在可以直接导入的是字幕文件（${SUBTITLE_EXTENSIONS.join(' / ')}）。`
+        : `「${asset.ext}」的文字提取需要本地识别引擎（OCR），` +
+          `当前版本暂不提供。现在可以直接导入的是字幕文件` +
+          `（${SUBTITLE_EXTENSIONS.join(' / ')}），音频与视频可以走语音转写。`
+
+    sendResult(res, err('NOT_IMPLEMENTED', message, { ext: asset.ext, kind: asset.kind }))
   })
 
   router.get('/assets/:id/segments', (req, res) => {
