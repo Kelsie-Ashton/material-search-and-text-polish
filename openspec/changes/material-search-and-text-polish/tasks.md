@@ -49,7 +49,7 @@
 - [x] 5.4 实现音频与视频的语音转写链路，验证提取结果中每段文字附带正确的起止时间（`extraction/media.ts` 四阶段：探测 → 抽音轨 → 转写 → 落库；`ffmpeg.parseMediaInfo` 从真实 stderr 解析时长与流构成，「无音轨」是明确的 skipped 分支而非失败。已接入提取分派：音视频入队、字幕同步、图片如实报未实现。端到端验证见 `jobs/handlers.test.ts`——真队列、真落库，只替换模型本身）
 - [ ] 5.5 实现视频画面文字识别并与语音结果合并，验证同一视频的提取文本同时包含两类来源且分别标注
 - [ ] 5.6 实现视频画面识别失败不影响语音结果的降级路径，验证画面识别失败时语音文本仍被保留并记录失败原因
-- [ ] 5.7 实现进程内串行提取任务队列与状态轮询接口，验证同时提交多个素材时按序执行，前端可轮询到各自进度（**部分完成**：`extract` 处理器已注册、串行由队列本身保证（一次只取一条）、取消经 `isCancelled` 检查点生效；**状态轮询接口本身尚未提供**，`/api/jobs` 路由待建）
+- [x] 5.7 实现进程内串行提取任务队列与状态轮询接口，验证同时提交多个素材时按序执行，前端可轮询到各自进度（`extract` 处理器、串行（一次只取一条）、取消检查点见 5.4；本轮补上轮询接口 `routes/jobs.ts`——`GET /api/jobs` 支持 `type` / `targetId` / `active` 筛选、`GET /api/jobs/:id`、`POST /api/jobs/:id/cancel`（返回 `canceled-immediately` 或 `will-stop-at-checkpoint`）。进度写进 `jobs.progress_message`（`media.ts` 的 `ExtractPhase` 四阶段），前端一轮询就能看到。新增 `extraction/asset-status.ts`：`extract_status` 是冗余物化列，真相在 `jobs` 与 `extraction_runs`，不写五段 UPDATE 而只写一个推导函数，五个变化时刻各重新推导一次；队列新增 `onSettled` 落定回调承担收尾（**处理器不能自己收尾**：`queue.runJob` 在 handler 返回后才写终态，handler 在 `finally` 里同步会读到 `running`，把刚落库的 `done` / `failed` 覆盖回中间态）；启动时 `reconcileAssetStatus()` 对账，修掉崩溃后永久停在「提取中」的素材。串行与进度各自可轮询的端到端验证见 `jobs/handlers.test.ts`）
 - [ ] 5.8 实现空结果处理，验证无语音或无文字的素材状态为「已提取」、文本为空，且界面给出对应提示
 - [ ] 5.9 实现提取失败标记、原因记录与重试入口，验证单个素材失败不影响队列中其他素材，重试后状态回到「提取中」
 - [ ] 5.10 实现基于文件指纹（大小 + 修改时间）的提取结果缓存，验证未变化素材重复提取时直接复用，文件修改后重新提取并覆盖
