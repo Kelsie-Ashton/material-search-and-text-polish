@@ -8,6 +8,7 @@ import { type CredentialsStore, credentialsStore } from './credentials/store.js'
 import type { Db } from './db/index.js'
 import type { JobQueue } from './jobs/queue.js'
 import { createExtractionRouter } from './routes/extraction.js'
+import { createJobsRouter } from './routes/jobs.js'
 import { createLibraryRouter } from './routes/library.js'
 import { createSearchRouter } from './routes/search.js'
 import { createSettingsRouter } from './routes/settings.js'
@@ -67,6 +68,11 @@ export function createApp(options: AppOptions = {}) {
   // 所以队列可选传入，缺失时那一条路径如实报「未启用」（extraction.ts 里有说明）
   if (options.db) {
     api.use('/extraction', createExtractionRouter(options.db, options.jobQueue))
+  }
+
+  // 任务路由必须有队列：它整个存在的意义就是报告队列的状态
+  if (options.db && options.jobQueue) {
+    api.use('/jobs', createJobsRouter(options.db, options.jobQueue))
   }
 
   // 后续路由（polish）在此挂载

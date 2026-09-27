@@ -1,6 +1,7 @@
 import { Router } from 'express'
 
 import type { Db } from '../db/index.js'
+import { syncAssetExtractStatus } from '../extraction/asset-status.js'
 import { importSubtitleText, listSegments } from '../extraction/importer.js'
 import { isMediaKind } from '../extraction/media.js'
 import { SUBTITLE_EXTENSIONS, isSubtitleExtension } from '../extraction/subtitle.js'
@@ -69,9 +70,16 @@ export function createExtractionRouter(db: Db, queue?: JobQueue): Router {
         sendResult(res, job)
         return
       }
+
+      // 立刻把素材推进到「提取中」（spec：界面立即返回并将状态置为提取中）。
+      // 同步推导会读到刚入队的任务，所以这里不需要另一套赋值逻辑。
+      // 不这样做的话，素材在 worker 取到它之前一直显示「未提取」——
+      // 排在长队列后面时，用户点完提取看不到任何反应，只能反复点。
+      const status = syncAssetExtractStatus(db, id)
+
       // 202 而不是 200：活儿还没干完，返回的只是「受理了」。
       // 用 200 会让调用方以为拿到的就是提取结果。
-      sendResult(res, ok({ jobId: job.value.id }), 202)
+      sendResult(res, ok({ jobId: job.value.id, status }), 202)
       return
     }
 
