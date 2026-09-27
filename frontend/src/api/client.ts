@@ -27,7 +27,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ...(init?.headers ?? {}),
       },
     })
-  } catch (cause) {
+  } catch {
+    // 刻意不把原始错误往外抛：浏览器给出的 fetch 失败信息
+    // （「Failed to fetch」）对用户毫无意义，能行动的信息只有「后端没起来」
     throw new ApiRequestError({
       code: 'NETWORK_ERROR',
       message: '无法连接到本地服务，请确认后端已启动',

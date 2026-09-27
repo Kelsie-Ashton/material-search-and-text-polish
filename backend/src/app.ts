@@ -5,6 +5,9 @@ import express, { type ErrorRequestHandler, Router } from 'express'
 
 import { frontendDistDir } from './config.js'
 import { type CredentialsStore, credentialsStore } from './credentials/store.js'
+import type { Db } from './db/index.js'
+import type { JobQueue } from './jobs/queue.js'
+import { createLibraryRouter } from './routes/library.js'
 import { createSettingsRouter } from './routes/settings.js'
 
 export interface AppOptions {
@@ -13,6 +16,9 @@ export interface AppOptions {
    * 测试注入临时文件，避免碰到用户真实的凭证。
    */
   credentialsStore?: CredentialsStore
+  /** 索引数据库。与 jobQueue 同时提供时才会挂载素材库路由。 */
+  db?: Db
+  jobQueue?: JobQueue
 }
 
 /**
@@ -37,7 +43,15 @@ export function createApp(options: AppOptions = {}) {
 
   api.use('/settings', createSettingsRouter(options.credentialsStore ?? credentialsStore))
 
-  // 后续路由（library / search / extraction / polish）在此挂载
+  // 素材库路由依赖数据库与任务队列。二者缺一就不挂载——
+  // 但这不是「可选功能」：真实入口 index.ts 一定会传，
+  // app.test.ts 里有一条测试专门断言传了之后路由确实存在，
+  // 免得哪天忘了接线却一路静默跑到线上。
+  if (options.db && options.jobQueue) {
+    api.use('/library', createLibraryRouter(options.db, options.jobQueue))
+  }
+
+  // 后续路由（search / extraction / polish）在此挂载
 
   app.use('/api', api)
 
