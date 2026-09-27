@@ -2,12 +2,16 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { toUserMessage } from '../api/client'
 import {
+  type AppPreferences,
   type CredentialsStatus,
   type PolishAvailability,
+  type TextScript,
   clearCredentials,
   getCredentials,
   getPolishAvailability,
+  getPreferences,
   saveCredentials,
+  savePreferences,
   testCredentials,
 } from '../api/settings'
 
@@ -26,6 +30,12 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState<Busy>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [confirmingClear, setConfirmingClear] = useState(false)
+
+  // 偏好单独加载与单独报错：它读的是数据库（凭证读的是文件），
+  // 一边出问题不该让整个设置页变成错误页。
+  const [preferences, setPreferences] = useState<AppPreferences | null>(null)
+  const [prefError, setPrefError] = useState<string | null>(null)
+  const [savingPref, setSavingPref] = useState(false)
 
   const reload = useCallback(async () => {
     try {
@@ -46,6 +56,47 @@ export default function SettingsPage() {
   useEffect(() => {
     void reload()
   }, [reload])
+
+  useEffect(() => {
+    let cancelled = false
+    getPreferences()
+      .then((next) => {
+        if (cancelled) return
+        setPreferences(next)
+        setPrefError(null)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setPrefError(toUserMessage(err))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /**
+   * 下拉框改一下就立刻保存，没有单独的「保存」按钮。
+   *
+   * 页面上已经有一个保存按钮了（属于凭证表单）。再放第二个，两者含义不同
+   * 却长得一样，用户很容易以为改完下拉框要点那个按钮——点了会连带提交
+   * 凭证表单。单选项即时生效是这类偏好设置的常见预期，也少一次误操作。
+   */
+  async function handleScriptChange(next: TextScript) {
+    const previous = preferences
+    // 先乐观更新：下拉框要马上跟手，否则用户会以为没选上而再点一次
+    setPreferences({ textScript: next })
+    setSavingPref(true)
+    setPrefError(null)
+    try {
+      setPreferences(await savePreferences({ textScript: next }))
+    } catch (err) {
+      // 保存失败必须回滚显示，绝不能停在一个「看着像改好了、其实没写进去」的状态
+      setPreferences(previous)
+      setPrefError(toUserMessage(err))
+    } finally {
+      setSavingPref(false)
+    }
+  }
 
   // 测试测的是**已保存**的凭证。输入框里有未保存的 Key 时，测试结果会与
   // 用户的预期不符，所以直接禁用并说明原因，而不是让他去猜。
@@ -275,6 +326,45 @@ export default function SettingsPage() {
           {notice.text}
         </div>
       ) : null}
+
+      <section className="settings-block">
+        <h3 className="block-title">默认文本保存方式</h3>
+        <p className="block-desc">
+          提取出的文字按哪种字形存进素材库。这一项直接决定能不能搜到：
+          检索是按字符匹配的，库里存繁体而你搜简体，就是零结果，且不会报错。
+        </p>
+
+        {preferences === null && prefError === null ? (
+          <p className="field-hint">正在读取…</p>
+        ) : (
+          <label className="field">
+            <span className="field-label">默认文本保存方式</span>
+            <select
+              value={preferences?.textScript ?? 'simplified'}
+              disabled={savingPref || preferences === null}
+              onChange={(event) => void handleScriptChange(event.target.value as TextScript)}
+            >
+              <option value="simplified">简体中文（默认）</option>
+              <option value="traditional">繁体中文</option>
+            </select>
+            <span className="field-hint">
+              字幕与语音转写的原文常是繁体，默认会转成简体再入库；选繁体则反向转换。
+              只换字形，不改用词。
+            </span>
+          </label>
+        )}
+
+        {prefError !== null ? (
+          <div className="notice notice-error" role="status">
+            {prefError}
+          </div>
+        ) : (
+          <p className="field-hint">
+            改动只影响之后提取的文字。已经提取过的素材需要重新提取一次，
+            才会按新的字形重新入库。
+          </p>
+        )}
+      </section>
 
       <div className="callout">
         <strong>关于密钥安全</strong>

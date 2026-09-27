@@ -57,3 +57,24 @@ export function clearCredentials(): Promise<{ cleared: boolean }> {
 export function getPolishAvailability(): Promise<PolishAvailability> {
   return unwrap<PolishAvailability>(apiGet('/api/settings/polish-availability'))
 }
+
+/**
+ * 文本字形：简体 / 繁体。
+ *
+ * 与后端 `shared/text-script.ts` 的取值一一对应——两边都要认识它，
+ * 所以字面量在这里重复了一遍，改的时候必须一起改。
+ */
+export type TextScript = 'simplified' | 'traditional'
+
+export interface AppPreferences {
+  textScript: TextScript
+}
+
+export function getPreferences(): Promise<AppPreferences> {
+  return unwrap<AppPreferences>(apiGet('/api/settings/preferences'))
+}
+
+/** 只传要改的项，返回的是**完整**偏好，可直接整体覆盖本地状态。 */
+export function savePreferences(input: Partial<AppPreferences>): Promise<AppPreferences> {
+  return unwrap<AppPreferences>(apiPut('/api/settings/preferences', input))
+}
