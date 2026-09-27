@@ -34,8 +34,11 @@ if (recovered > 0) {
 // 队列恢复了不算完：素材那一侧的 extract_status 是另一张表上的物化列，
 // recoverInterrupted 管不到它。必须在这里再对一次账，否则上次被杀时正在跑的
 // 素材会永远显示「提取中」而没有任何东西在跑，用户只能干等。
-// 顺序也要紧：必须在 recoverInterrupted **之后**，否则被重置回 queued 的任务
-// 会被当作活跃任务，把素材状态又推回「排队中」。
+//
+// 顺序要紧：必须在 recoverInterrupted **之后**。对账读的是 jobs 的当前状态，
+// 反过来的话它读到的是一个即将被改写的旧值——任务还是 running，于是推导结果
+// 与素材现状一致，对账认为「没什么要修的」（实测：修正 0 个），
+// 而素材就那么留在「提取中」，其实任务只是在排队。
 const reconciled = reconcileAssetStatus(db)
 if (reconciled > 0) {
   console.log(`已修正 ${reconciled} 个素材的提取状态`)
