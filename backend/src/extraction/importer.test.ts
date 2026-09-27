@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { Db } from '../db/index.js'
 import { createAsset, createDirectory, ftsRowIds } from '../test/factory.js'
+import { updateSettings } from '../settings/preferences.js'
 import { createTestDb } from '../test/temp-db.js'
 import { importSubtitleText, listSegments } from './importer.js'
 
@@ -284,6 +285,139 @@ describe('字幕导入', () => {
     // 级联删除必须触发 FTS 的 AFTER DELETE 触发器，否则会留下
     // 指向不存在段落的幽灵条目——用户会看到点不开的搜索结果。
     expect(ftsRowIds(db, '火锅店')).not.toContain(segmentId)
+  })
+})
+
+describe('按偏好转换字形后再落库', () => {
+  const TRADITIONAL_SRT = [
+    '1',
+    '00:00:01,000 --> 00:00:04,000',
+    '今天我們來探店這家火鍋店',
+    '',
+    '2',
+    '00:00:05,000 --> 00:00:08,000',
+    '招牌菜是毛肚和鴨腸',
+    '',
+  ].join('\r\n')
+
+  function traditionalSubtitle(name = '繁体.srt') {
+    const file = writeFile(name, TRADITIONAL_SRT)
+    return createAsset(db, directoryId, {
+      fileName: name,
+      path: file,
+      ext: '.srt',
+      kind: 'text',
+    })
+  }
+
+  it('默认把繁体字幕转成简体入库', () => {
+    // 这是用户实际遇到的问题：网上下的字幕、以及 Whisper 的转写输出
+    // 都默认是繁体，而检索按字符匹配——库里存繁体、用户搜简体就是零结果，
+    // 而且**不报错**，用户只会以为「这个素材没提到过」。
+    const asset = traditionalSubtitle()
+
+    importSubtitleText(db, asset.id)
+
+    const items = listSegments(db, asset.id).items
+    expect(items[0]?.text).toBe('今天我们来探店这家火锅店')
+    expect(items[1]?.text).toBe('招牌菜是毛肚和鸭肠')
+  })
+
+  it('转成简体后能用简体关键词搜到', () => {
+    // 上一条断言的是文本，这一条断言的是**索引**。
+    // 落库的文本与 FTS 里的内容由触发器同步，两处必须都是转换后的字——
+    // 若只在读取时转换，库和索引仍是繁体，搜索照样搜不到。
+    const asset = traditionalSubtitle()
+    importSubtitleText(db, asset.id)
+
+    const segmentId = listSegments(db, asset.id).items[0]?.id ?? 0
+    expect(ftsRowIds(db, '火锅店')).toContain(segmentId)
+    expect(ftsRowIds(db, '火鍋店')).not.toContain(segmentId)
+  })
+
+  it('偏好设为繁体时，简体字幕会被转成繁体入库', () => {
+    // 反过来也要成立，而且起点得是**简体**字幕——
+    // 用繁体字幕做夹具的话，「转成繁体」和「原样不动」的结果一模一样，
+    // 这条测试就永远是绿的，测不出东西。
+    updateSettings(db, { textScript: 'traditional' })
+    const asset = subtitleAsset('简体.srt', '.srt')
+
+    importSubtitleText(db, asset.id)
+
+    const items = listSegments(db, asset.id).items
+    expect(items[0]?.text).toBe('今天我們來探店這家火鍋店')
+    expect(items[1]?.text).toBe('招牌菜是毛肚和鴨腸')
+  })
+
+  it('改了偏好后再导入会重新解析，而不是复用旧字形', () => {
+    // 最隐蔽的坑：文本落库时就定了，缓存又只看「文件指纹 + 引擎版本」。
+    // 引擎版本里若不带上字形，用户把偏好从简体改成繁体再点提取，
+    // 只会命中旧缓存拿到简体——**设置改了却毫无反应**，还不报错。
+    const asset = traditionalSubtitle()
+    importSubtitleText(db, asset.id)
+    expect(listSegments(db, asset.id).items[0]?.text).toBe('今天我们来探店这家火锅店')
+
+    updateSettings(db, { textScript: 'traditional' })
+    const second = importSubtitleText(db, asset.id)
+
+    expect(second.ok && second.value.reused).toBe(false)
+    expect(listSegments(db, asset.id).items[0]?.text).toBe('今天我們來探店這家火鍋店')
+  })
+
+  it('偏好没变时缓存照常命中', () => {
+    // 上一条容易改过头——把所有情况都判成缓存失效，白跑一遍解析。
+    // 这里钉住：只有偏好真的变了才失效。
+    const asset = traditionalSubtitle()
+    importSubtitleText(db, asset.id)
+
+    const second = importSubtitleText(db, asset.id)
+    expect(second.ok && second.value.reused).toBe(true)
+  })
+
+  it('字形偏好写进了 extraction_runs 的引擎版本', () => {
+    // 缓存键是这个字段，所以它必须真的带上字形；
+    // 只断言「重新解析了」的话，万一缓存判定被别的原因改坏，
+    // 这条线索就丢了。
+    const asset = traditionalSubtitle()
+    updateSettings(db, { textScript: 'traditional' })
+    importSubtitleText(db, asset.id)
+
+    const run = db
+      .prepare('SELECT engine_versions FROM extraction_runs WHERE asset_id = ?')
+      .get(asset.id) as { engine_versions: string } | undefined
+
+    expect(run?.engine_versions).toBe('subtitle-v1+traditional')
+  })
+
+  it('转换是幂等的，缩略字幕重复导入不会逐次漂移', () => {
+    // 简→简、繁→繁都必须不变。否则每提取一次文字就变一点，
+    // 用户会看到文本在自己的眼前慢慢变样。
+    const asset = subtitleAsset('简体.srt', '.srt')
+    importSubtitleText(db, asset.id)
+    const first = listSegments(db, asset.id).items[0]?.text
+
+    db.prepare('UPDATE assets SET fingerprint = ? WHERE id = ?').run('fp-changed', asset.id)
+    importSubtitleText(db, asset.id)
+
+    expect(listSegments(db, asset.id).items[0]?.text).toBe(first)
+  })
+
+  it('不转换非中文内容', () => {
+    // 英文字幕里一个繁简字符都没有，转换器不该碰它。
+    const file = writeFile(
+      'en.srt',
+      ['1', '00:00:01,000 --> 00:00:04,000', 'Welcome to my channel', ''].join('\r\n'),
+    )
+    const asset = createAsset(db, directoryId, {
+      fileName: 'en.srt',
+      path: file,
+      ext: '.srt',
+      kind: 'text',
+    })
+
+    importSubtitleText(db, asset.id)
+
+    expect(listSegments(db, asset.id).items[0]?.text).toBe('Welcome to my channel')
   })
 })
 

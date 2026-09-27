@@ -3,6 +3,9 @@ import fs from 'node:fs'
 import { type Db, inTransaction } from '../db/index.js'
 import { type AssetDetail, findAsset } from '../library/assets.js'
 import { err, ok, type Result } from '../shared/result.js'
+import type { TextScript } from '../shared/text-script.js'
+import { readTextScript } from '../settings/preferences.js'
+import { convertScript } from './chinese.js'
 import { SUBTITLE_EXTENSIONS, decodeSubtitleText, isSubtitleExtension, parseSubtitle } from './subtitle.js'
 
 /**
@@ -16,9 +19,17 @@ import { SUBTITLE_EXTENSIONS, decodeSubtitleText, isSubtitleExtension, parseSubt
  * 字符串处理。为它造一个假任务只会让前端多一轮无意义的轮询。
  *
  * 另：本模块**只读文件，不写不删**。素材的正文提取绝不能碰原始文件。
+ *
+ * 落库前会按用户在设置页选的「默认文本保存方式」统一转换字形（见 chinese.ts）。
+ * 字幕文件尤其需要：网上下的 `.ass` 大量是繁体，而检索是按字符匹配的，
+ * 繁简对不上就是零结果。
  */
 
-/** 解析器版本。参与指纹缓存判定——解析逻辑改了，缓存就该失效。 */
+/**
+ * 解析器版本。参与指纹缓存判定——解析逻辑改了，缓存就该失效。
+ *
+ * 注意它只是**基础**版本号，实际写进库的是 `engineLabel()` 拼上字形偏好的结果。
+ */
 export const PARSER_VERSION = 'subtitle-v1'
 
 /** 提取文本的来源标记，与 schema 里 `asset_text_segments.source` 对应 */
@@ -51,7 +62,7 @@ interface RunRow {
  * 失败也要留下 `extraction_runs` 行：用户看到「提取失败」时，
  * 下一步一定是问「为什么」。原因必须落在库里，而不是只回给这一次请求。
  */
-function markFailed(db: Db, asset: AssetDetail, code: string, message: string): void {
+function markFailed(db: Db, asset: AssetDetail, label: string, code: string, message: string): void {
   const now = Date.now()
   inTransaction(db, () => {
     const run = db
@@ -60,7 +71,7 @@ function markFailed(db: Db, asset: AssetDetail, code: string, message: string): 
            (asset_id, fingerprint, status, engine_versions, error_code, error_message, started_at, finished_at)
          VALUES (?, ?, 'failed', ?, ?, ?, ?, ?)`,
       )
-      .run(asset.id, asset.fingerprint, PARSER_VERSION, code, message, now, now)
+      .run(asset.id, asset.fingerprint, label, code, message, now, now)
 
     db.prepare(
       `INSERT INTO extraction_run_sources (run_id, source, status, segment_count, error_code, error_message)
@@ -74,19 +85,32 @@ function markFailed(db: Db, asset: AssetDetail, code: string, message: string): 
 }
 
 /**
- * 指纹缓存：文件没变、且上次是同一个解析器版本跑成功的，就不必重来。
+ * 本次提取的「引擎版本」标签，同时也是缓存键的一部分。
+ *
+ * **字形必须进来。** 落库的文本会随用户偏好变（简体 / 繁体），
+ * 所以「同一份文件、同一个解析器版本」并不保证产出同一份文本。
+ * 若只按 PARSER_VERSION 判缓存，用户把偏好从简体改成繁体再点提取，
+ * 会命中旧缓存、拿到简体——**设置改了却毫无反应**，
+ * 而且不报任何错，是最难查的那类问题。
+ */
+function engineLabel(script: TextScript): string {
+  return `${PARSER_VERSION}+${script}`
+}
+
+/**
+ * 指纹缓存：文件没变、解析器版本与字形偏好都没变、且上次跑成功了，就不必重来。
  *
  * 这不只是省时间——**重新导入会先删掉旧段落再写入**，无谓地重跑一次
  * 就多一次「中途失败导致文本丢失」的机会。
  */
-function findCachedRun(db: Db, asset: AssetDetail): number | null {
+function findCachedRun(db: Db, asset: AssetDetail, label: string): number | null {
   const row = db
     .prepare(
       `SELECT id FROM extraction_runs
         WHERE asset_id = ? AND fingerprint = ? AND status = 'succeeded' AND engine_versions = ?
         ORDER BY id DESC LIMIT 1`,
     )
-    .get(asset.id, asset.fingerprint, PARSER_VERSION) as RunRow | undefined
+    .get(asset.id, asset.fingerprint, label) as RunRow | undefined
   return row?.id ?? null
 }
 
@@ -109,13 +133,17 @@ export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtit
     )
   }
 
+  // 落库前先读偏好。**这一步必须在缓存判定之前**——它参与缓存键。
+  const script = readTextScript(db)
+  const label = engineLabel(script)
+
   if (asset.sizeBytes > MAX_SUBTITLE_BYTES) {
     const message = `字幕文件过大（${Math.round(asset.sizeBytes / 1024 / 1024)} MB），已跳过`
-    markFailed(db, asset, 'EXTRACTION_FAILED', message)
+    markFailed(db, asset, label, 'EXTRACTION_FAILED', message)
     return err('EXTRACTION_FAILED', message, { id: assetId, sizeBytes: asset.sizeBytes })
   }
 
-  const cached = findCachedRun(db, asset)
+  const cached = findCachedRun(db, asset, label)
   if (cached !== null) {
     const segmentCount = countSegments(db, assetId)
     return ok({
@@ -134,7 +162,7 @@ export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtit
     // 文件在磁盘上被删了、被移走了、或没有读权限——这三种对用户来说是
     // 不同的问题，但都表现为「读不到」，把系统给的原文带上更好排查。
     const message = `无法读取字幕文件：${error instanceof Error ? error.message : String(error)}`
-    markFailed(db, asset, 'EXTRACTION_FAILED', message)
+    markFailed(db, asset, label, 'EXTRACTION_FAILED', message)
     return err('EXTRACTION_FAILED', message, { id: assetId, path: asset.path })
   }
 
@@ -152,7 +180,7 @@ export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtit
            (asset_id, fingerprint, status, engine_versions, started_at, finished_at)
          VALUES (?, ?, 'succeeded', ?, ?, ?)`,
       )
-      .run(asset.id, asset.fingerprint, PARSER_VERSION, now, now)
+      .run(asset.id, asset.fingerprint, label, now, now)
 
     db.prepare(
       `INSERT INTO extraction_run_sources (run_id, source, status, segment_count)
@@ -172,7 +200,10 @@ export function importSubtitleText(db: Db, assetId: number): Result<ImportSubtit
         run.lastInsertRowid,
         SOURCE,
         index,
-        cue.text,
+        // 唯一一处字形转换。**落库的文本必须是转换后的**，
+        // 因为 FTS 索引由触发器跟着这一行同步——索引里存的就是这里写下的字，
+        // 事后再改就没机会了（除非整段重写）。
+        convertScript(cue.text, script),
         cue.startMs,
         cue.endMs,
         now,
