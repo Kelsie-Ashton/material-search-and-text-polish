@@ -1,4 +1,5 @@
 import { apiDelete, apiGet, apiPost } from './client'
+import type { JobRecord } from './jobs'
 
 /**
  * 素材库的接口封装。
@@ -38,26 +39,6 @@ export interface RemoveDirectorySummary {
   removedAssets: number
   /** 恒定 true。写出来是为了让调用方无法假装它删了磁盘文件。 */
   filesUntouched: true
-}
-
-/** 对应 backend/src/jobs/queue.ts 的 JobRecord */
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled'
-
-export interface JobRecord {
-  id: number
-  type: 'scan' | 'extract' | 'polish'
-  status: JobStatus
-  targetId: number | null
-  progressCurrent: number
-  progressTotal: number
-  progressMessage: string | null
-  cancelRequested: boolean
-  result: unknown
-  errorCode: string | null
-  errorMessage: string | null
-  createdAt: number
-  startedAt: number | null
-  finishedAt: number | null
 }
 
 /** 对应 backend/src/library/scanner.ts 的 ScanSummary */
@@ -183,18 +164,17 @@ export function removeDirectory(id: number): Promise<RemoveDirectorySummary> {
   return unwrap<RemoveDirectorySummary>(apiDelete(`/api/library/directories/${id}`))
 }
 
-// ---------------------------------------------------------------- 任务
+// ---------------------------------------------------------------- 扫描
 
+/**
+ * 触发扫描。返回的是任务记录本身——扫描**不是一个请求就跑完的**，
+ * 它被丢进队列，进度要去 `api/jobs.ts` 里轮询。
+ *
+ * 这条留在素材库模块里，是因为它挂在目录下面（`/directories/:id/scan`）：
+ * 「扫这个目录」天然属于目录的操作。其余任务的读取与取消都在 `api/jobs.ts`。
+ */
 export function startScan(directoryId: number): Promise<JobRecord> {
   return unwrap<JobRecord>(apiPost(`/api/library/directories/${directoryId}/scan`))
-}
-
-export function getJob(id: number): Promise<JobRecord> {
-  return unwrap<JobRecord>(apiGet(`/api/library/jobs/${id}`))
-}
-
-export function cancelJob(id: number): Promise<{ outcome: CancelOutcome }> {
-  return unwrap<{ outcome: CancelOutcome }>(apiPost(`/api/library/jobs/${id}/cancel`))
 }
 
 // ---------------------------------------------------------------- 素材

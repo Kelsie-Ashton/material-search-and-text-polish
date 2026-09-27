@@ -87,7 +87,7 @@ beforeEach(() => {
         )
       }
 
-      if (url.includes('/api/library/jobs/') && method === 'GET') {
+      if (url.includes('/api/jobs/') && method === 'GET') {
         const next = jobQueue.shift()
         return json({ ok: true, value: next })
       }

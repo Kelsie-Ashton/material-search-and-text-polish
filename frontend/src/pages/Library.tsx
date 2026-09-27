@@ -1,19 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { toUserMessage } from '../api/client'
+import { type JobRecord, cancelJob, getJob } from '../api/jobs'
 import {
   type AssetSummary,
   type DirectoryRecord,
   type ExtractStatus,
-  type JobRecord,
   KIND_LABELS,
   STATUS_LABELS,
   type ScanSummary,
   addDirectory,
-  cancelJob,
   formatBytes,
   formatTime,
-  getJob,
   listAssets,
   listDirectories,
   removeDirectory,

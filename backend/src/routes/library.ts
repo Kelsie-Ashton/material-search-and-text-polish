@@ -124,46 +124,12 @@ export function createLibraryRouter(db: Db, queue: JobQueue): Router {
     sendResult(res, job, 202)
   })
 
-  router.get('/jobs/:id', (req, res) => {
-    const id = parseId(req.params.id)
-    if (id === null) {
-      sendResult(res, err('VALIDATION_FAILED', '任务 id 不合法'), 400)
-      return
-    }
-    sendResult(res, queue.get(id))
-  })
-
-  router.post('/jobs/:id/cancel', (req, res) => {
-    const id = parseId(req.params.id)
-    if (id === null) {
-      sendResult(res, err('VALIDATION_FAILED', '任务 id 不合法'), 400)
-      return
-    }
-
-    const outcome = queue.cancel(id)
-    if (!outcome.ok) {
-      sendResult(res, outcome)
-      return
-    }
-
-    // 用 202 而不是 200：'will-stop-at-checkpoint' 意味着工作还在继续，
-    // 界面必须继续轮询，而不是立刻把进度条抹掉。
-    res.status(202).json({ ok: true, value: { outcome: outcome.value } })
-  })
-
-  router.get('/jobs', (req, res) => {
-    const type = req.query['type']
-    if (type !== undefined && type !== 'scan' && type !== 'extract' && type !== 'polish') {
-      sendResult(res, err('VALIDATION_FAILED', '任务类型不合法'), 400)
-      return
-    }
-
-    const items = queue.list({
-      type: type as 'scan' | 'extract' | 'polish' | undefined,
-      activeOnly: req.query['activeOnly'] === 'true',
-    })
-    res.json({ ok: true, value: { items } })
-  })
+  // 任务的读取与取消**不在这里**：`/api/jobs` 是它们唯一的家。
+  // 扫描刚开始做的时候这里曾有一套 /jobs、/jobs/:id、/jobs/:id/cancel，
+  // 提取做起来后又需要一套更全的（按素材筛、取消时把任务一起回给前端），
+  // 于是同一件事有了两套形状不同的接口——这类重复迟早会漂移成
+  // 「扫描的进度查得到、提取的查不到」这种没人能一眼看懂的 bug。
+  // 保留目录下面那个 startScan，是因为它天然属于目录（POST /directories/:id/scan）。
 
   // ------------------------------------------------------------ 素材
 

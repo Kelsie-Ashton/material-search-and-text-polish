@@ -190,46 +190,8 @@ describe('素材库路由', () => {
       expect(res.body.error.code).toBe('DIRECTORY_NOT_FOUND')
     })
 
-    it('可以查询任务进度，也能取消', async () => {
-      const gate = createGate()
-      queue.register('scan', async (context) => {
-        context.reportProgress(2, 0, '已发现 2 项')
-        await gate.wait()
-        return ok(null)
-      })
-
-      const id = await addDirectoryViaApi(makeDir('查进度'))
-      const scan = await request(app).post(`/api/library/directories/${id}/scan`)
-      const jobId = scan.body.value.id as number
-
-      const got = await request(app).get(`/api/library/jobs/${jobId}`)
-      expect(got.status).toBe(200)
-      expect(got.body.value.progressMessage).toBe('已发现 2 项')
-
-      // 202 而不是 200：任务还在跑，界面必须继续轮询，
-      // 不能因为收到「成功」就把进度条抹掉
-      const canceled = await request(app).post(`/api/library/jobs/${jobId}/cancel`)
-      expect(canceled.status).toBe(202)
-      expect(canceled.body.value.outcome).toBe('will-stop-at-checkpoint')
-
-      gate.open()
-    })
-
-    it('取消不存在的任务返回 404', async () => {
-      const res = await request(app).post('/api/library/jobs/9999/cancel')
-
-      expect(res.status).toBe(404)
-      expect(res.body.error.code).toBe('JOB_NOT_FOUND')
-    })
-
-    it('任务列表可以按类型筛选，非法类型返回 400', async () => {
-      const ok1 = await request(app).get('/api/library/jobs?type=scan')
-      expect(ok1.status).toBe(200)
-
-      const bad = await request(app).get('/api/library/jobs?type=不存在的类型')
-      expect(bad.status).toBe(400)
-      expect(bad.body.error.code).toBe('VALIDATION_FAILED')
-    })
+    // 任务的读取与取消在 routes/jobs.test.ts 里测，那里用的是真实的提取任务，
+    // 还会连带验证取消后素材状态归位——比在这里拿扫描任务测更贴近实际用法。
   })
 
   describe('素材', () => {
