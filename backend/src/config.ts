@@ -58,7 +58,7 @@ export const port = Number(process.env['PORT'] ?? 5174)
  * 把镜像写死会拖慢所有人、还把供应链信任交给第三方。
  *
  * 但有些网络确实直连不了——本项目开发机上实测 huggingface.co 只有
- * 0.07 MB/s（388 MB 要 92 分钟），而 hf-mirror.com 有 2.88 MB/s。
+ * 0.07 MB/s（241 MB 的模型要将近一小时），换 hf-mirror.com 后是分钟级。
  * 那种环境下用 `HF_ENDPOINT=https://hf-mirror.com` 覆盖即可。
  *
  * 注意 Transformers.js **不认 `HF_ENDPOINT` 这个环境变量**
@@ -83,8 +83,8 @@ export const asrModel = process.env['ASR_MODEL'] ?? 'Xenova/whisper-small'
 
 /**
  * 量化精度。`q8` 是体积与质量的折中点：
- * whisper-small 的 q8 约 238 MB（encoder 88 + decoder_merged 150），
- * q4f16 约 191 MB 但精度更低。
+ * whisper-small 的 q8 解包后实测占盘 241 MB（`du -sh`），
+ * q4f16 更小但精度更低。
  */
 export const asrDtype = process.env['ASR_DTYPE'] ?? 'q8'
 

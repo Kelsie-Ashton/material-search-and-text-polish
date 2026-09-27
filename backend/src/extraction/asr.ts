@@ -12,9 +12,14 @@ import { err, ok, type Result } from '../shared/result.js'
  * 三件在真实环境里踩过的事，都在这里处理掉：
  *
  * 1. **模型源必须可配。** Transformers.js 默认从 huggingface.co 拉模型，
- *    而有些网络直连它极慢（本项目开发机实测 0.07 MB/s，388 MB 要 92 分钟）。
- *    它**不认 `HF_ENDPOINT` 环境变量**（v4.3.0 实测），所以这里显式赋给
- *    `env.remoteHost`。
+ *    而有些网络直连它极慢：本项目开发机实测 0.07 MB/s，而 `Xenova/whisper-small`
+ *    的 q8 权重解包后有 241 MB（实测 `du -sh`），按这个速度要**将近一小时**；
+ *    换镜像后是分钟级。所以 `HF_ENDPOINT` 这个开关是必需品，README 与
+ *    .env.example 里都写了它。
+ *
+ *    注意 **Transformers.js 自己不认 `HF_ENDPOINT` 环境变量**（v4.3.0 实测），
+ *    是 `config.ts` 把环境变量读进来、由这里显式赋给 `env.remoteHost`。
+ *    换句话说：少了下面那一行赋值，README 里的说明就变成了空头承诺。
  * 2. **输出是繁体。** 必须转换，且 `initial_prompt` 偏置无效——见 chinese.ts。
  *    但转换**不在本模块做**：往哪个方向转是用户偏好，这里拿不到也不该拿到。
  *    本模块只管「把模型输出解析成段落」，转换在落库那一刻统一发生（persist.ts）。
@@ -96,7 +101,7 @@ export async function getTranscriber(): Promise<Result<AutomaticSpeechRecognitio
     // 提示里必须说清这一点，否则用户只会看到一句英文报错。
     return err(
       'EXTRACTION_FAILED',
-      `语音模型加载失败（首次使用需要联网下载约 238 MB）：${message}`,
+      `语音模型加载失败（首次使用需要联网下载约 241 MB）：${message}`,
       { model: asrModel, endpoint: hfEndpoint },
     )
   }
@@ -173,7 +178,7 @@ export async function transcribeAudio(
  * 留在这里的后果是双向的：用户选繁体时，这里先转简、落库再转繁，
  * 一次多余的往返；而简↔繁并非逐字可逆，还可能改坏原文。
  *
- * 导出是为了能直接测：跑通它不需要下载 238 MB 的模型，
+ * 导出是为了能直接测：跑通它不需要下载 241 MB 的模型，
  * 而把模型输出解析错（时间轴错位、空段落混进结果）恰恰是这里最容易出的问题。
  */
 export function toSegments(output: unknown): TranscriptSegment[] {
