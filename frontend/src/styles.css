@@ -137,3 +137,203 @@ body {
   font-size: 13px;
   opacity: 0.75;
 }
+
+/* ---------- 表单 ---------- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 620px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.field-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.field input {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  transition: border-color 0.15s;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.field input::placeholder {
+  color: #5c6478;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+button {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+
+button:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #3f7ce8;
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: #4a2a2f;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #2a1a1d;
+}
+
+code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12.5px;
+}
+
+/* ---------- 凭证状态卡片 ---------- */
+
+.status-card {
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  margin-bottom: 26px;
+}
+
+.status-card.is-ok {
+  border-color: #234a2c;
+  background: rgba(63, 185, 80, 0.07);
+}
+
+.status-card.is-off {
+  border-color: #4a3a1f;
+  background: rgba(224, 163, 58, 0.07);
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-card.is-ok .status-dot {
+  background: var(--ok);
+}
+
+.status-card.is-off .status-dot {
+  background: var(--warn);
+}
+
+.status-detail {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ---------- 提示条 ---------- */
+
+.notice {
+  margin-top: 20px;
+  padding: 11px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 13.5px;
+}
+
+.notice-ok {
+  border-color: #234a2c;
+  background: rgba(63, 185, 80, 0.1);
+}
+
+.notice-error {
+  border-color: #4a2a2f;
+  background: rgba(242, 85, 90, 0.1);
+}
+
+.notice-info {
+  border-color: #2a3a52;
+  background: rgba(79, 140, 255, 0.1);
+}
+
+/* ---------- 说明块 ---------- */
+
+.callout {
+  margin-top: 34px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+.callout strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.callout ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.callout li {
+  margin-bottom: 4px;
+}

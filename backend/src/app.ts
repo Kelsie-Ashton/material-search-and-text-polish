@@ -4,12 +4,22 @@ import path from 'node:path'
 import express, { type ErrorRequestHandler, Router } from 'express'
 
 import { frontendDistDir } from './config.js'
+import { type CredentialsStore, credentialsStore } from './credentials/store.js'
+import { createSettingsRouter } from './routes/settings.js'
+
+export interface AppOptions {
+  /**
+   * 凭证存储。默认用指向 data/credentials.json 的单例；
+   * 测试注入临时文件，避免碰到用户真实的凭证。
+   */
+  credentialsStore?: CredentialsStore
+}
 
 /**
  * 组装 Express 应用。
  * 与监听分离，便于测试中直接使用 app 而不占用端口。
  */
-export function createApp() {
+export function createApp(options: AppOptions = {}) {
   const app = express()
 
   app.use(express.json({ limit: '1mb' }))
@@ -25,7 +35,9 @@ export function createApp() {
     })
   })
 
-  // 后续路由（settings / library / search / extraction / polish）在此挂载
+  api.use('/settings', createSettingsRouter(options.credentialsStore ?? credentialsStore))
+
+  // 后续路由（library / search / extraction / polish）在此挂载
 
   app.use('/api', api)
 

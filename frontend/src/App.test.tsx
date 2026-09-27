@@ -24,7 +24,9 @@ describe('前端骨架', () => {
   it('每条路由渲染各自的页面内容', () => {
     expect(renderAt('/search')).toContain('输入关键词')
     expect(renderAt('/library')).toContain('添加本地素材目录')
-    expect(renderAt('/settings')).toContain('API Key')
+    // 服务端渲染不会执行 useEffect，因此设置页停在「读取凭证」这一帧。
+    // 表单本身由 Settings.test.tsx 在 jsdom 下覆盖。
+    expect(renderAt('/settings')).toContain('正在读取本机凭证')
   })
 
   it('未知路径不会崩溃', () => {
