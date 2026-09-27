@@ -49,7 +49,15 @@
 
 OCR 采用 `tesseract.js`（含 `chi_sim` 中文语言包），语音转写采用 `@huggingface/transformers`（Transformers.js），二者均为纯 WASM / npm 包，随 `npm install` 一并就位，不需要任何原生编译工具链。
 
-- **备选：`whisper.cpp` 的 Node 绑定**——原方案。调研后弃用：`nodejs-whisper` 需要用户自备 MSYS2/MinGW-w64 工具链，`smart-whisper` 的 Windows 预编译产物未能确认可用。在 Windows 上安装失败率高，与「按时完成」直接冲突。Transformers.js 走 WASM，代价是首次需下载模型（用 `dtype: 'q8'` 压到约 54 MB），但换来「装即用」，值得。
+- **备选：`whisper.cpp` 的 Node 绑定**——原方案。调研后弃用：`nodejs-whisper` 需要用户自备 MSYS2/MinGW-w64 工具链，`smart-whisper` 的 Windows 预编译产物未能确认可用。在 Windows 上安装失败率高，与「按时完成」直接冲突。Transformers.js 走 WASM，代价是首次需下载模型，但换来「装即用」，值得。
+
+**实施期修订（2026-09-27，已实测）**，三处与初稿不符，均已改：
+
+1. **模型不是原定的 `onnx-community/whisper-small-chinese-2-ONNX`，改用 `Xenova/whisper-small`。** 原定模型在 Transformers.js 4.3.0 上**直接跑不通**：它的 ONNX 图要求一个 `cache_position` 输入而库不提供，报 `Missing the following inputs: cache_position`。已排除"仓库个体问题"之外的干扰项——同一段路径下 `Xenova/whisper-tiny` 与 `Xenova/whisper-small` 均正常。模型名做成可配置（`ASR_MODEL`）。
+2. **体积估算错了。** 初稿写「`q8` 约 54 MB」，实测 whisper-small 的 q8 需要 `encoder_model_quantized`(88 MB) + `decoder_model_merged_quantized`(150 MB) = **238 MB**。注意只有这两份参与生成，仓库里其余十几个 `.onnx` 变体（`decoder_model_*`、`decoder_with_past_model_*`、`fp16`、`bnb4` 等）不会被下载。
+3. **转写输出是繁体，必须后处理转简体。** 实测普通话语音转写得到「今天我們來探店這家火鍋店」。试过用 `initial_prompt` 偏置（`'以下是普通话的句子。'` 等），**三种提示下输出逐字相同**，这条路不通。改用 `opencc-js` 做字符级转换。**刻意不用它的 `twp` 配置**：那会做词汇映射（把「請開啟軟體」改写成「请打开软件」），而转写场景下说话人说的就是"开启"，不该替他改词。
+
+   质量实测（一段由 Windows 中文 TTS 合成的 9.7 秒普通话）：`whisper-small` 仅错一字（「毛肚」→「毛賭」）；`whisper-tiny` 错四处（探店→看電、毛肚→毛土、鸭肠→亞長），且把「人均消费八十元」写成「80元」。**故取 small**，转写速度约 2.9x 实时。
 - **备选：PaddleOCR + faster-whisper 的 Python 侧车**——中文识别质量更好，但要求用户自行准备 Python 环境与 `paddlepaddle`，在 Windows 上安装失败率高，会显著拉长首次启动链路并增加支持成本。作为**已知质量风险**保留为后续可选增强（见 Open Questions），而非 MVP 方案。
 - 该决策的代价是中文 OCR 精度有上限，缓解手段：OCR 主要用于视频字幕与画面文字（字体规整、对比度高），这类场景 tesseract 表现可接受；同时允许用户手工修正提取文本。实测 tesseract.js 对中文准确率约 70–85%，且**必须预处理**（灰度化 → 二值化 → 放大 2–3 倍）才能进这个区间，直接把原图喂进去会更差——这是必要步骤，不是可选优化。
 
@@ -134,7 +142,7 @@ OCR 采用 `tesseract.js`（含 `chi_sim` 中文语言包），语音转写采�
 
 | 文件类型 | 提取方式 | 依赖 |
 |---|---|---|
-| 音频 / 视频 | 语音转写 | Whisper 模型（`dtype: 'q8'`，约 54 MB） |
+| 音频 / 视频 | 语音转写 | `Xenova/whisper-small`，`dtype: 'q8'`，首次下载约 238 MB |
 | 图片 / 视频画面 | OCR | `tesseract.js` + `chi_sim` 语言包 |
 | **字幕文件（`.srt` / `.vtt` / `.ass` / `.ssa`）** | **直接解析** | **无** |
 

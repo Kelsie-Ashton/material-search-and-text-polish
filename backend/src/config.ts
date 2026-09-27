@@ -52,6 +52,49 @@ export const frontendDistDir = path.join(projectRoot, 'frontend', 'dist')
 export const port = Number(process.env['PORT'] ?? 5174)
 
 /**
+ * 模型下载源。
+ *
+ * **默认官方源，不硬编码镜像。** 官方源在大多数网络下是正常且最快的，
+ * 把镜像写死会拖慢所有人、还把供应链信任交给第三方。
+ *
+ * 但有些网络确实直连不了——本项目开发机上实测 huggingface.co 只有
+ * 0.07 MB/s（388 MB 要 92 分钟），而 hf-mirror.com 有 2.88 MB/s。
+ * 那种环境下用 `HF_ENDPOINT=https://hf-mirror.com` 覆盖即可。
+ *
+ * 注意 Transformers.js **不认 `HF_ENDPOINT` 这个环境变量**
+ * （v4.3.0 实测），所以这个名字是**我们自己定的**，读到之后由
+ * `extraction/asr.ts` 显式赋给 `env.remoteHost`。取这个名字是为了
+ * 与 HuggingFace 生态的惯例一致，用户不必记一个新名字。
+ */
+export const hfEndpoint = process.env['HF_ENDPOINT'] ?? 'https://huggingface.co'
+
+/**
+ * 中文语音转写模型。
+ *
+ * **不是规划里最初写的那个。** 原定的
+ * `onnx-community/whisper-small-chinese-2-ONNX` 在 Transformers.js 4.3.0 上
+ * 直接跑不通：它的 ONNX 图要求一个 `cache_position` 输入，而库不提供，
+ * 报 `Missing the following inputs: cache_position`。实测换成
+ * `Xenova/whisper-small` 后正常（见 design.md 决策 2 的修订记录）。
+ *
+ * 做成可配置是因为模型迭代很快，换一个不该改代码。
+ */
+export const asrModel = process.env['ASR_MODEL'] ?? 'Xenova/whisper-small'
+
+/**
+ * 量化精度。`q8` 是体积与质量的折中点：
+ * whisper-small 的 q8 约 238 MB（encoder 88 + decoder_merged 150），
+ * q4f16 约 191 MB 但精度更低。
+ */
+export const asrDtype = process.env['ASR_DTYPE'] ?? 'q8'
+
+/**
+ * OCR 语言包。**必须是 `chi_sim`**——写成 `zho` 会加载失败。
+ * 本变更只做中文，多语言列入未来规划。
+ */
+export const ocrLanguages = ['chi_sim']
+
+/**
  * 服务必须仅绑定回环地址。
  * 本服务能读取用户本机任意已授权目录，绝不能暴露到局域网。
  */
