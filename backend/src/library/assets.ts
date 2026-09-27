@@ -103,6 +103,40 @@ function tagsByAsset(db: Db, assetIds: number[]): Map<number, TagRef[]> {
   return grouped
 }
 
+/**
+ * 按 id 批量取素材摘要，返回 id → 摘要。
+ *
+ * 检索要的是「先排序分页、再取这一页的素材」，而不是「把全部命中的素材
+ * 都读进来再切一页」。所以需要一个按 id 集合取数据的入口。
+ *
+ * 刻意**不保证顺序**（返回 Map），也**不保证补齐缺失的 id**：
+ * 调用方自己决定缺失时怎么办（检索层是跳过——素材可能在两次查询之间被删了）。
+ */
+export function summariesByIds(db: Db, ids: number[]): Map<number, AssetSummary> {
+  const result = new Map<number, AssetSummary>()
+  if (ids.length === 0) return result
+
+  // 分批查：SQLite 的变量个数有上限（默认 999），
+  // 检索结果超过这个数时一次性 IN 会直接报错。
+  const CHUNK = 500
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK)
+    const placeholders = chunk.map(() => '?').join(', ')
+    const rows = db
+      .prepare(`SELECT * FROM assets WHERE id IN (${placeholders})`)
+      .all(...chunk) as AssetRowShape[]
+
+    const tags = tagsByAsset(
+      db,
+      rows.map((row) => row.id),
+    )
+    for (const row of rows) {
+      result.set(row.id, toSummary(row, tags.get(row.id) ?? []))
+    }
+  }
+  return result
+}
+
 export interface ListAssetsOptions {
   directoryId?: number | undefined
   kind?: AssetKind | undefined

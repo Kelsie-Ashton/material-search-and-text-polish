@@ -8,6 +8,7 @@ import { type CredentialsStore, credentialsStore } from './credentials/store.js'
 import type { Db } from './db/index.js'
 import type { JobQueue } from './jobs/queue.js'
 import { createLibraryRouter } from './routes/library.js'
+import { createSearchRouter } from './routes/search.js'
 import { createSettingsRouter } from './routes/settings.js'
 
 export interface AppOptions {
@@ -51,7 +52,12 @@ export function createApp(options: AppOptions = {}) {
     api.use('/library', createLibraryRouter(options.db, options.jobQueue))
   }
 
-  // 后续路由（search / extraction / polish）在此挂载
+  // 检索只读数据库，不需要任务队列，故单独判断
+  if (options.db) {
+    api.use('/search', createSearchRouter(options.db))
+  }
+
+  // 后续路由（extraction / polish）在此挂载
 
   app.use('/api', api)
 
