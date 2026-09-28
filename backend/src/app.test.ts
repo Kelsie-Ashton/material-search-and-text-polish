@@ -126,3 +126,60 @@ describe('畸形请求体', () => {
     expect(res.body.error.code).toBe('CREDENTIALS_NOT_CONFIGURED')
   })
 })
+
+/**
+ * 「只接受本机请求」这道闸有没有真的接上（任务 7.4）。
+ *
+ * **判据本身的用例在 `shared/local-request.test.ts`，这里测的是接线**——
+ * 一个写得完全正确的判据，如果没挂到应用上，防线照样是空的，
+ * 而且没有任何迹象。这两层必须各自被测到。
+ */
+describe('非本机请求被拒绝', () => {
+  const app = createApp()
+
+  it('Host 是陌生域名时 403', async () => {
+    // 这一条对应 DNS 重绑定：浏览器认为它与目标是同源的，连 Origin 都不发，
+    // 唯一能识破的就是 Host。
+    const res = await request(app).get('/api/health').set('Host', 'evil.example.com')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('REQUEST_NOT_LOCAL')
+  })
+
+  it('Origin 是陌生来源时 403', async () => {
+    // 这一条对应「恶意页面在用户浏览器里发请求」：源地址源端口全都合法，
+    // 只有 Origin 能说明它不是本机页面。
+    const res = await request(app)
+      .post('/api/settings/credentials/test')
+      .set('Origin', 'https://evil.example.com')
+
+    expect(res.status).toBe(403)
+    expect(res.body.error.code).toBe('REQUEST_NOT_LOCAL')
+  })
+
+  it('本机请求照常放行', async () => {
+    // 与上面两条同等重要：拦错的话用户什么都做不了，
+    // 而且请求根本没到业务代码，他没有任何线索能查。
+    const res = await request(app)
+      .get('/api/health')
+      .set('Host', '127.0.0.1:5174')
+      .set('Origin', 'http://127.0.0.1:5173')
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+  })
+
+  it('被拒的请求不会走到业务代码', async () => {
+    // 闸装在路由之前，所以 /api/health 这种最轻的接口也进不去。
+    // 更重要的是：闸在 express.json **之前**，一个不该被处理的请求
+    // 不该再花力气去解析它的请求体——那正是攻击者最想让我们干的事。
+    const res = await request(app)
+      .post('/api/settings/credentials/test')
+      .set('Host', 'evil.example.com')
+      .send({ huge: 'x'.repeat(1000) })
+
+    expect(res.status).toBe(403)
+    // 被拒的是整个请求，而不是「解析完了才发现来源不对」
+    expect(res.body.error.code).toBe('REQUEST_NOT_LOCAL')
+  })
+})

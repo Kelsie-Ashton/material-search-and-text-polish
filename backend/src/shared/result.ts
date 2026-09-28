@@ -14,6 +14,14 @@ export type ErrorCode =
   | 'VALIDATION_FAILED'
   | 'CONFLICT'
   | 'NOT_IMPLEMENTED'
+  /**
+   * 请求不是来自本机（任务 7.4）。详见 `shared/local-request.ts`。
+   *
+   * 单独一个码而不是复用 `VALIDATION_FAILED`：这两件事在处理上完全不同——
+   * 参数不合法要用户去改请求，而这一条的意思是「这个请求根本不该发到这里」。
+   * 日志里也需要能把它们分开，否则真实的攻击尝试会混在一堆 400 里。
+   */
+  | 'REQUEST_NOT_LOCAL'
   // 凭证
   | 'CREDENTIALS_NOT_CONFIGURED'
   | 'CREDENTIALS_INVALID'

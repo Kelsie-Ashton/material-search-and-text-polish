@@ -14,6 +14,7 @@ import { createLibraryRouter } from './routes/library.js'
 import { createPolishRouter } from './routes/polish.js'
 import { createSearchRouter } from './routes/search.js'
 import { createSettingsRouter } from './routes/settings.js'
+import { checkLocalRequest } from './shared/local-request.js'
 
 export interface AppOptions {
   /**
@@ -71,6 +72,37 @@ export function createApp(options: AppOptions = {}) {
   // 测试应当注入临时文件（`createApp({ credentialsStore })`）。忘了注入的话，
   // 落到的这个真实单例会在**被用到时**自己拦下来——见 store.ts 里的说明。
   const store = options.credentialsStore ?? credentialsStore
+
+  /**
+   * 只接受来自本机的请求（任务 7.4）。
+   *
+   * **放在最前面**，早于 `express.json`：一个不该被处理的请求，不该再花
+   * 力气去解析它的请求体——那正是攻击者最想让我们干的事。
+   *
+   * 为什么绑了 127.0.0.1 还需要这一层，见 `shared/local-request.ts`：
+   * 绑定回环挡得住别的机器，挡不住**用户自己浏览器里的**页面。
+   */
+  app.use((req, res, next) => {
+    const rejection = checkLocalRequest({
+      host: req.headers.host,
+      origin: req.headers.origin,
+    })
+    if (rejection === null) {
+      next()
+      return
+    }
+
+    // 用 warn 而不是 error：这不是「我们的代码错了」，是一次被挡下的请求。
+    // 但它值得留痕——被拒的请求在正常使用中不会出现，出现了就该有人看一眼。
+    console.warn(`[refused] 非本机请求（${rejection.reason}）：${rejection.detail}`)
+    res.status(403).json({
+      ok: false,
+      error: {
+        code: 'REQUEST_NOT_LOCAL',
+        message: '这个服务只接受来自本机的请求',
+      },
+    })
+  })
 
   app.use(express.json({ limit: '1mb' }))
 

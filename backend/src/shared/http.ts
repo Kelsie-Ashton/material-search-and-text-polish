@@ -15,6 +15,8 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   VALIDATION_FAILED: 400,
   CONFLICT: 409,
   NOT_IMPLEMENTED: 501,
+  // 403 而不是 400：请求本身是合法的，只是不该来自这里
+  REQUEST_NOT_LOCAL: 403,
 
   // 凭证类：语义上都是「上游不让我们干活」，逐个区分是为了让 UI 给出准确指引
   CREDENTIALS_NOT_CONFIGURED: 409,
