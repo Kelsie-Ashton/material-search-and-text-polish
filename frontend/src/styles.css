@@ -948,3 +948,22 @@ code {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* 候选关键词是一个可勾选的词组，视觉上要像「可选择的东西」而不是已经挂上的标签。
+   与 .tag-chip 拉开距离：那个是既成事实（带 × 可删），这个是待定选项。 */
+.candidate-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 8px;
+  border: 1px dashed var(--border, rgba(127, 127, 127, 0.5));
+  border-radius: 999px;
+  font-size: 13px;
+  cursor: pointer;
+  /* 勾选整条都能点，而不是只有那个小方块——手指没有那么准 */
+  user-select: none;
+}
+
+.candidate-chip:hover {
+  border-style: solid;
+}

@@ -225,6 +225,42 @@ export function unlinkTag(assetId: number, tagId: number): Promise<{ removed: bo
   return unwrap<{ removed: boolean }>(apiDelete(`/api/library/assets/${assetId}/tags/${tagId}`))
 }
 
+/** 对应 backend/src/tags/keywords.ts 的 KeywordCandidate */
+export interface KeywordCandidate {
+  word: string
+  /** 在正文里出现的次数。显示出来是为了让用户判断这个词有没有代表性 */
+  frequency: number
+}
+
+/**
+ * 从这条素材已提取的正文里挑候选关键词。**不联网，不花钱。**
+ *
+ * 已经挂过的标签会被后端剔掉——否则用户勾了、点了归档、什么也没发生，
+ * 看起来就像功能坏了。
+ */
+export function fetchTagCandidates(assetId: number): Promise<KeywordCandidate[]> {
+  return unwrap<{ items: KeywordCandidate[] }>(
+    apiGet(`/api/library/assets/${assetId}/tag-candidates`),
+  ).then((value) => value.items)
+}
+
+/** 对应 backend/src/tags/archive.ts 的 ArchiveSummary */
+export interface ArchiveSummary {
+  /** 这次真的挂上的 */
+  linked: TagRef[]
+  /** 本来就已经挂着的——不是错误，但也不该说成「已归档」 */
+  alreadyLinked: TagRef[]
+  /** 名字不合法的。跳过它们比整批失败好 */
+  invalid: string[]
+}
+
+/** 把一批关键词归档成这条素材的标签。 */
+export function archiveKeywords(assetId: number, keywords: string[]): Promise<ArchiveSummary> {
+  return unwrap<ArchiveSummary>(
+    apiPost(`/api/library/assets/${assetId}/tags/archive`, { keywords }),
+  )
+}
+
 // ---------------------------------------------------------------- 格式化
 
 export function formatBytes(bytes: number): string {

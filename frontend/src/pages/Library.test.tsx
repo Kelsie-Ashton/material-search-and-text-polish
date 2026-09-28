@@ -45,6 +45,11 @@ let detailExtras: Record<number, Record<string, unknown>>
 let extractionResponse: unknown
 /** 取提取文本的响应体 */
 let segmentsResponse: unknown
+/** 候选关键词（GET /assets/:id/tag-candidates） */
+let tagCandidates: unknown
+/** 归档响应（POST /assets/:id/tags/archive） */
+let archiveResponse: unknown
+let archiveRequests: Array<string[]>
 /** 润色可用性。默认「未配置」——这是最常见的初始状态 */
 let polishAvailability: unknown
 /** 读润色结果（GET）的响应体 */
@@ -72,6 +77,9 @@ beforeEach(() => {
   detailExtras = {}
   extractionResponse = { ok: true, value: { items: [], total: 0 } }
   segmentsResponse = { ok: true, value: { items: [], total: 0 } }
+  tagCandidates = { ok: true, value: { items: [] } }
+  archiveResponse = { ok: true, value: { linked: [], alreadyLinked: [], invalid: [] } }
+  archiveRequests = []
   polishAvailability = { ok: true, value: { available: false, reason: 'not_configured' } }
   polishState = { ok: true, value: { result: null, lastFailure: null } }
   polishResponse = { ok: true, value: { status: 'done', result: null } }
@@ -118,6 +126,19 @@ beforeEach(() => {
       if (url.includes('/api/jobs/') && method === 'GET') {
         const next = jobQueue.shift()
         return json({ ok: true, value: next })
+      }
+
+      // 归档为标签：候选与提交。要排在素材详情之前判断——
+      // `/assets/42/tag-candidates` 是 `/assets/42` 的路径前缀关系之外的兄弟路径，
+      // 但 archive 那条会被「详情」的正则误伤，所以先判。
+      if (url.includes('/tag-candidates') && method === 'GET') {
+        return json(tagCandidates)
+      }
+
+      if (url.includes('/tags/archive') && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { keywords: string[] }
+        archiveRequests.push(body.keywords)
+        return json(archiveResponse)
       }
 
       // 润色：可用性、读结果、发起。
@@ -631,7 +652,8 @@ describe('素材库页面', () => {
 
       const button = await screen.findByRole('button', { name: '润色成文案' })
       expect((button as HTMLButtonElement).disabled).toBe(true)
-      expect(screen.getByText(/先在上面提取一次/)).toBeTruthy()
+      // 断言到整句：归档那块也会说「先在上面提取一次」，两处的后半句不同
+      expect(screen.getByText(/它的文字才能拿来润色/)).toBeTruthy()
     })
 
     it('已配置且有文字：点一下就能看到润色结果，与原文同屏对照', async () => {
@@ -712,6 +734,121 @@ describe('素材库页面', () => {
       await user.click(button)
 
       expect(polishRequests).toBe(0)
+    })
+  })
+  describe('归档为标签', () => {
+    /** 一条已提取正文、且有候选关键词可挑的素材 */
+    function useAssetWithCandidates(): void {
+      useAsset({ fileName: '探店.mp4', ext: '.mp4', kind: 'video', extractStatus: 'done' })
+      detailExtras[42] = { extractStatus: 'done', segmentCount: 5 }
+      tagCandidates = {
+        ok: true,
+        value: {
+          items: [
+            { word: '火锅店', frequency: 12 },
+            { word: '毛肚', frequency: 5 },
+          ],
+        },
+      }
+    }
+
+    it('把候选关键词列出来，并显示出现次数', async () => {
+      useAssetWithCandidates()
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      // 次数显示出来，用户才好判断这个词在这条素材里到底有没有代表性
+      expect(await screen.findByText('火锅店')).toBeTruthy()
+      expect(screen.getByText('12')).toBeTruthy()
+      expect(screen.getByText('毛肚')).toBeTruthy()
+    })
+
+    it('勾选后归档，并把结果如实说清楚', async () => {
+      useAssetWithCandidates()
+      archiveResponse = {
+        ok: true,
+        value: {
+          linked: [
+            { id: 1, name: '火锅店', color: null },
+            { id: 2, name: '毛肚', color: null },
+          ],
+          alreadyLinked: [],
+          invalid: [],
+        },
+      }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      await user.click(await screen.findByText('火锅店'))
+      await user.click(await screen.findByText('毛肚'))
+      // 按钮上带已选数量，免得用户勾了看不见的几个就点下去
+      await user.click(await screen.findByRole('button', { name: /归档为标签（已选 2）/ }))
+
+      await waitFor(() => expect(archiveRequests).toEqual([['火锅店', '毛肚']]))
+      expect(await screen.findByText(/已归档 2 个标签/)).toBeTruthy()
+    })
+
+    it('「本来就有」与「刚归档上」分开说，不合成一句「完成」', async () => {
+      // 这两个对用户的意思完全不同：一个是「这个词我早就打过了」，
+      // 一个是「这个词刚归档上」。合成一句他就分不清刚才到底做了什么。
+      useAssetWithCandidates()
+      archiveResponse = {
+        ok: true,
+        value: {
+          linked: [{ id: 1, name: '火锅店', color: null }],
+          alreadyLinked: [{ id: 9, name: '毛肚', color: null }],
+          invalid: [],
+        },
+      }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      await user.click(await screen.findByText('火锅店'))
+      await user.click(await screen.findByRole('button', { name: /归档为标签/ }))
+
+      expect(await screen.findByText(/已归档 1 个标签，1 个之前就有/)).toBeTruthy()
+    })
+
+    it('一个都没勾就点归档：说清楚，而不是发一个空请求', async () => {
+      useAssetWithCandidates()
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      await user.click(await screen.findByRole('button', { name: /归档为标签（已选 0）/ }))
+
+      expect(await screen.findByText('先勾选要归档的关键词。')).toBeTruthy()
+      expect(archiveRequests).toEqual([])
+    })
+
+    it('还没提取过文字：说清要先提取，而不是列一个空框', async () => {
+      useAsset({ fileName: '探店.mp4', ext: '.mp4', kind: 'video' })
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      expect(await screen.findByText(/才能从正文里挑关键词/)).toBeTruthy()
+    })
+
+    it('挑不出候选时说明原因，而不是一个空区块', async () => {
+      // 「挑不出」与「还没读回来」是两回事，该给两句不同的话
+      useAsset({ fileName: '探店.mp4', ext: '.mp4', kind: 'video', extractStatus: 'done' })
+      detailExtras[42] = { extractStatus: 'done', segmentCount: 5 }
+      tagCandidates = { ok: true, value: { items: [] } }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      expect(await screen.findByText(/没有挑出值得归档的词/)).toBeTruthy()
     })
   })
 })

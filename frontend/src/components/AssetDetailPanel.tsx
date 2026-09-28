@@ -15,8 +15,11 @@ import { type PolishState, fetchPolish, runPolish } from '../api/polish'
 import { type PolishAvailability, getPolishAvailability } from '../api/settings'
 import {
   type AssetDetail,
+  type KeywordCandidate,
   KIND_LABELS,
   STATUS_LABELS,
+  archiveKeywords,
+  fetchTagCandidates,
   formatBytes,
   formatTime,
   getAsset,
@@ -81,6 +84,16 @@ export default function AssetDetailPanel({
   /** 凭证可用性。null 表示还没问到；「未配置」是正常状态，不是错误。 */
   const [availability, setAvailability] = useState<PolishAvailability | null>(null)
 
+  /**
+   * 候选关键词与勾选状态。
+   *
+   * `null` 表示还没读回来——与「读回来了、但一个候选都没有」是两回事：
+   * 前者该说「正在看正文」，后者该说「这段正文里挑不出值得归档的词」。
+   */
+  const [candidates, setCandidates] = useState<KeywordCandidate[] | null>(null)
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [archiveBusy, setArchiveBusy] = useState(false)
+
   const reload = useCallback(async () => {
     try {
       setDetail(await getAsset(assetId))
@@ -113,6 +126,22 @@ export default function AssetDetailPanel({
     }
   }, [assetId])
 
+  /**
+   * 读候选关键词。
+   *
+   * 失败时**静默**给空数组：这个区块是锦上添花，为了它弹一条红条，
+   * 会让用户以为整条素材出了问题。真正要紧的是下面的标签区，
+   * 而手输标签那条路一直可用。
+   */
+  const reloadCandidates = useCallback(async () => {
+    try {
+      setCandidates(await fetchTagCandidates(assetId))
+    } catch {
+      setCandidates([])
+    }
+    setPicked(new Set())
+  }, [assetId])
+
   useEffect(() => {
     void reload()
     void reloadPolish()
@@ -132,10 +161,14 @@ export default function AssetDetailPanel({
     if (detail.segmentCount === 0) {
       setSegments(null)
       setSegmentTotal(0)
+      // 没有正文就没有可挑的词。清成空数组而不是 null：
+      // 这是「确实挑不出来」，与「还没读回来」要给两句不同的话。
+      setCandidates([])
       return
     }
     void reloadSegments()
-  }, [detail, reloadSegments])
+    void reloadCandidates()
+  }, [detail, reloadSegments, reloadCandidates])
 
   // ---------------------------------------------------------- 提取轮询
 
@@ -193,6 +226,8 @@ export default function AssetDetailPanel({
         // 同步完成的那条路（字幕与纯文本）：结果已经在了，直接读回来
         await reload()
         await reloadSegments()
+        // 刚提取出正文，候选关键词这时才有的可挑
+        await reloadCandidates()
         onExtractionChanged?.()
 
         // 读进来的是字幕还是纯文本，提示语要说准——同一句
@@ -251,6 +286,49 @@ export default function AssetDetailPanel({
       await reloadPolish()
     } finally {
       setPolishBusy(false)
+    }
+  }
+
+  function togglePicked(word: string) {
+    setPicked((current) => {
+      const next = new Set(current)
+      if (next.has(word)) next.delete(word)
+      else next.add(word)
+      return next
+    })
+  }
+
+  async function handleArchive() {
+    const keywords = [...picked]
+    // 一个都没勾就点归档：与其发一个空请求换回一个空结果，不如直接说清楚。
+    if (keywords.length === 0) {
+      setNotice({ kind: 'info', text: '先勾选要归档的关键词。' })
+      return
+    }
+
+    setArchiveBusy(true)
+    setNotice(null)
+    try {
+      const summary = await archiveKeywords(assetId, keywords)
+      await reload()
+      // 归档之后这些词就不再是候选了（后端会把已挂过的剔掉），
+      // 重新拉一次，界面上它们会从候选区移到上面的标签区——
+      // 这个「东西动了地方」的反馈比任何提示语都直观
+      await reloadCandidates()
+      onTagsChanged?.()
+
+      // 三个桶分开说。合成一句「完成」的话，用户就分不清
+      // 「这个词我早就打过了」和「这个词刚归档上」。
+      const parts = [`已归档 ${summary.linked.length} 个标签`]
+      if (summary.alreadyLinked.length > 0) {
+        parts.push(`${summary.alreadyLinked.length} 个之前就有`)
+      }
+      if (summary.invalid.length > 0) parts.push(`${summary.invalid.length} 个名字不合法，已跳过`)
+      setNotice({ kind: 'ok', text: `${parts.join('，')}。` })
+    } catch (err) {
+      setNotice({ kind: 'error', text: toUserMessage(err) })
+    } finally {
+      setArchiveBusy(false)
     }
   }
 
@@ -556,6 +634,58 @@ export default function AssetDetailPanel({
         {polish !== null && polish.result === null && polish.lastFailure !== null ? (
           <div className="notice notice-error">上次润色失败：{polish.lastFailure.message}</div>
         ) : null}
+      </div>
+
+      {/* ---------------------------------------------------------- 归档为标签 */}
+
+      <div className="detail-section">
+        <h4 className="detail-subtitle">归档为标签</h4>
+
+        {candidates === null ? (
+          <p className="field-hint">正在看这条素材的正文…</p>
+        ) : candidates.length === 0 ? (
+          <p className="field-hint">
+            {detail.segmentCount === 0
+              ? '这条素材还没有提取出文字。先在上面提取一次，才能从正文里挑关键词。'
+              : '这条正文里没有挑出值得归档的词（也可能是它们都已经打上标签了）。可以在下面手动添加。'}
+          </p>
+        ) : (
+          <>
+            <p className="field-hint">
+              下面这些词是从这条素材的正文里挑出来的。勾选后归档成标签，之后用这些词就能直接搜到这条素材，
+              而且重新提取、换字形都不会把它弄丢。挑得不一定准，你自己看着勾。
+            </p>
+
+            <div className="tag-row">
+              {candidates.map((candidate) => (
+                <label key={candidate.word} className="candidate-chip">
+                  <input
+                    type="checkbox"
+                    checked={picked.has(candidate.word)}
+                    onChange={() => togglePicked(candidate.word)}
+                  />
+                  <span>{candidate.word}</span>
+                  {/* 出现次数：让用户判断这个词在这条素材里到底有没有代表性 */}
+                  <span className="muted">{candidate.frequency}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="extract-action">
+              <button type="button" disabled={archiveBusy} onClick={() => void handleArchive()}>
+                {archiveBusy ? '归档中…' : `归档为标签（已选 ${picked.size}）`}
+              </button>
+              <button
+                type="button"
+                className="btn-more"
+                disabled={archiveBusy || picked.size === candidates.length}
+                onClick={() => setPicked(new Set(candidates.map((c) => c.word)))}
+              >
+                全选
+              </button>
+            </div>
+          </>
+        )}
       </div>
 
       {/* ---------------------------------------------------------- 标签 */}
