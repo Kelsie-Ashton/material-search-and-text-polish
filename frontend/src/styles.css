@@ -924,3 +924,12 @@ code {
   font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
   font-size: 12px;
 }
+
+/* 「展开全部 / 收起」是卡片内的次级操作，不该和「检索」抢注意力 */
+.btn-more {
+  margin-top: 10px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--muted);
+}

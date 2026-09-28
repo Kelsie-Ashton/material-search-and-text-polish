@@ -138,6 +138,97 @@ describe('检索页', () => {
     expect(screen.getByText('1:01')).toBeTruthy()
     // 两字关键词的降级必须如实说明，不能让用户以为它与长词是一回事
     expect(screen.getByText(/不足 3 个字，已改用全库扫描匹配/)).toBeTruthy()
+    // 只有一段，没有可展开的东西，此时不该凭空多出一个按钮
+    expect(screen.queryByRole('button', { name: /展开全部/ })).toBeNull()
+  })
+
+  it('默认只显示最相关的三段，展开铺开全部，收起再还原', async () => {
+    // 后端会把命中的片段全带回来（见 backend/src/search/index.test.ts），
+    // 前端只决定一次显示几条——所以这里发的请求数不会因为展开而变化。
+    const segments = [0, 1, 2, 3, 4].map((index) => ({
+      segmentId: index + 1,
+      source: 'audio',
+      ordinal: index,
+      startMs: null,
+      endMs: null,
+      frameMs: null,
+      snippet: `第${index}段里有火锅店`,
+      highlights: [{ start: 5, end: 8 }],
+      truncated: { head: false, tail: false },
+      rank: -1,
+    }))
+
+    response = {
+      ok: true,
+      value: {
+        items: [hit({ segments, segmentHitCount: segments.length })],
+        total: 1,
+        terms: [],
+        warnings: [],
+      },
+    }
+
+    const user = userEvent.setup()
+    render(<SearchPage />)
+    await user.type(screen.getByRole('searchbox'), '火锅店')
+    await user.click(screen.getByRole('button', { name: '检索' }))
+
+    // 折叠状态：只有前三段进了 DOM，后两段一个字都不该渲染
+    await screen.findByText('第0段里有')
+    expect(screen.getByText('第2段里有')).toBeTruthy()
+    expect(screen.queryByText('第3段里有')).toBeNull()
+    expect(screen.queryByText('第4段里有')).toBeNull()
+
+    // 命中总数写在按钮上：点之前就知道展开会多看到多少，不必先点开数一遍
+    await user.click(screen.getByRole('button', { name: '展开全部 5 段' }))
+
+    expect(screen.getByText('第4段里有')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '展开全部 5 段' })).toBeNull()
+
+    // 收起回到「只看三段」，而不是留在展开态
+    await user.click(screen.getByRole('button', { name: '收起' }))
+
+    expect(screen.queryByText('第4段里有')).toBeNull()
+    expect(screen.getByText('第0段里有')).toBeTruthy()
+  })
+
+  it('展开/收起不额外发请求，只是切换本地状态', async () => {
+    const segments = [0, 1, 2, 3].map((index) => ({
+      segmentId: index + 1,
+      source: 'audio',
+      ordinal: index,
+      startMs: null,
+      endMs: null,
+      frameMs: null,
+      snippet: `第${index}段里有火锅店`,
+      highlights: [],
+      truncated: { head: false, tail: false },
+      rank: -1,
+    }))
+
+    response = {
+      ok: true,
+      value: {
+        items: [hit({ segments, segmentHitCount: segments.length })],
+        total: 1,
+        terms: [],
+        warnings: [],
+      },
+    }
+
+    const user = userEvent.setup()
+    render(<SearchPage />)
+    await user.type(screen.getByRole('searchbox'), '火锅店')
+    await user.click(screen.getByRole('button', { name: '检索' }))
+    await screen.findByText('第0段里有火锅店')
+
+    const before = requestedUrls.length
+
+    await user.click(screen.getByRole('button', { name: '展开全部 4 段' }))
+    await user.click(screen.getByRole('button', { name: '收起' }))
+
+    // 片段早就在手里了，展开是纯展示选择，不该再换一次网络往返
+    expect(requestedUrls).toHaveLength(before)
   })
 
   it('高亮只包住命中的词，不吞掉相邻字符', () => {

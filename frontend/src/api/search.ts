@@ -55,11 +55,29 @@ export interface SearchHit {
   matchedIn: MatchSource[]
   matchedNames: string[]
   matchedTags: string[]
+  /**
+   * 该素材命中的**全部**正文片段，已按相关度排好序。
+   *
+   * 后端一次给全，所以「展开全部」是纯前端的状态切换，不需要再发请求；
+   * 折叠时少显示几条由本文件的 COLLAPSED_SEGMENT_COUNT 决定。
+   */
   segments: SegmentHit[]
+  /**
+   * 正文命中总段数。正常等于 segments.length；
+   * 只有单素材命中数超过后端上限时才会更大，此时界面必须如实说明。
+   */
   segmentHitCount: number
   tier: number
   matchedTerms: string[]
 }
+
+/**
+ * 结果卡片折叠时默认显示几条正文片段。
+ *
+ * 三条是**展示**上的取舍：再多就会把后面的素材挤出屏幕。
+ * 它不参与任何请求参数——后端每次都把命中的片段全带回来。
+ */
+export const COLLAPSED_SEGMENT_COUNT = 3
 
 export interface SearchResult {
   items: SearchHit[]

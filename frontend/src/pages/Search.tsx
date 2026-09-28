@@ -9,6 +9,7 @@ import {
   formatBytes,
 } from '../api/library'
 import {
+  COLLAPSED_SEGMENT_COUNT,
   MATCH_SOURCE_LABELS,
   type SearchHit,
   type SearchResult,
@@ -238,6 +239,14 @@ function EmptyState({ query, hasFilter }: { query: string; hasFilter: boolean })
 function ResultCard({ hit }: { hit: SearchHit }) {
   const { asset } = hit
 
+  // 折叠状态的默认值是「只显示最相关的三段」，展开后铺开全部。
+  // 后端一次就把命中的片段全带回来了，所以这里只切数组、不发请求——
+  // 展开是纯粹的展示选择，不该再换一次网络往返。
+  const [expanded, setExpanded] = useState(false)
+
+  const collapsible = hit.segments.length > COLLAPSED_SEGMENT_COUNT
+  const visible = expanded ? hit.segments : hit.segments.slice(0, COLLAPSED_SEGMENT_COUNT)
+
   return (
     <li className="result-card">
       <div className="result-head">
@@ -279,13 +288,36 @@ function ResultCard({ hit }: { hit: SearchHit }) {
         </div>
       ) : null}
 
-      {hit.segments.map((segment) => (
+      {visible.map((segment) => (
         <Snippet key={segment.segmentId} segment={segment} />
       ))}
 
+      {collapsible ? (
+        <button
+          type="button"
+          className="btn-more"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {/* 条数写在按钮上，用户点之前就知道展开会多看到多少，
+              不必先点开来数一遍 */}
+          {expanded ? '收起' : `展开全部 ${hit.segments.length} 段`}
+        </button>
+      ) : null}
+
+      {/*
+        只有撞到后端召回上限时才会出现：此时带回来的条数**小于**真实命中数，
+        不说清楚，用户会以为「展开全部」就是全部了。
+
+        片段一条都没带回来是可能的——命中都集中在别的素材上，召回额度被
+        它们用光了。这时不能说「只带了最相关的 0 段」，那句话读起来像程序
+        坏了；要如实说「这段正文没能取回来」，并让用户知道命中数是真的。
+      */}
       {hit.segmentHitCount > hit.segments.length ? (
         <div className="field-hint">
-          正文共命中 {hit.segmentHitCount} 段，这里显示最相关的 {hit.segments.length} 段。
+          {hit.segments.length === 0
+            ? `正文共命中 ${hit.segmentHitCount} 段，但这些片段没有取回来（命中太多，超出了单次召回的上限）。`
+            : `正文共命中 ${hit.segmentHitCount} 段，这里只带了最相关的 ${hit.segments.length} 段。`}
         </div>
       ) : null}
     </li>
