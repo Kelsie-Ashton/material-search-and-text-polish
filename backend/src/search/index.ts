@@ -16,8 +16,8 @@ import {
 import { rankHits, sortedSources, type RankInput } from './rank.js'
 import {
   DEFAULT_SEARCH_LIMIT,
-  DEFAULT_SEGMENTS_PER_ASSET,
   MAX_SEARCH_LIMIT,
+  MAX_SEGMENTS_PER_ASSET,
   type MatchSource,
   type SearchHit,
   type SearchOptions,
@@ -93,6 +93,19 @@ function collectCandidates(
     }
   }
 
+  // 只遍历 segments 是不够的。片段有全局上限（recall.ts 的 MAX_SEGMENT_ROWS），
+  // 命中集中在少数素材时，它们的额度会把上限用光，后面的素材**一段都取不回来**。
+  // 那些素材不会出现在 segments 里，于是整条结果消失：用户搜一个词，
+  // 某个文件明明命中了几十段，列表里连它的卡片都没有——比数字差几条严重得多。
+  //
+  // 计数是准的（见 countHitsByAsset），所以从计数里把它们补上。
+  // 它们以「命中数正确、片段为空」的形态出现，界面据此如实说明。
+  for (const [assetId, count] of segments.counts) {
+    const entry = ensure(assetId)
+    entry.sources.add('segment')
+    entry.segmentCount = Math.max(entry.segmentCount, count)
+  }
+
   return [...candidates.values()]
 }
 
@@ -106,7 +119,9 @@ export function search(db: Db, rawQuery: string, options: SearchOptions = {}): R
     extractStatus: options.extractStatus,
     directoryId: options.directoryId,
   }
-  const segmentsPerAsset = options.segmentsPerAsset ?? DEFAULT_SEGMENTS_PER_ASSET
+  // 召回时就按「上限」而不是「展示条数」来取：折叠显示三条是前端的事，
+  // 后端只给三条的话，用户在界面上点「展开全部」会没有任何东西可展开。
+  const segmentsPerAsset = options.segmentsPerAsset ?? MAX_SEGMENTS_PER_ASSET
 
   const fileNames = recallFileNames(db, terms, filter)
   const tags = recallTags(db, terms, filter)
@@ -145,6 +160,8 @@ export function search(db: Db, rawQuery: string, options: SearchOptions = {}): R
       matchedIn: sortedSources(hit.sources),
       matchedNames: [...new Set(hit.names)],
       matchedTags: [...new Set(hit.tags)],
+      // 这里仍然要切一刀：FTS 与 LIKE 两条路径各自带回了 segmentsPerAsset 条，
+      // 合并去重后可能接近两倍（同一段被两条路径命中时才会更少）。
       segments: hit.segments.slice(0, segmentsPerAsset),
       segmentHitCount: hit.segmentCount,
       tier: hit.tier,

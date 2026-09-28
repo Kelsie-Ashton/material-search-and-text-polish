@@ -69,25 +69,94 @@ const ENTITIES: Record<string, string> = {
 }
 
 /**
+ * 这个码点是不是「不用空格分词」的文字：中日韩汉字、假名、谚文，
+ * 以及中日韩自己的标点（、。「」《》…）。
+ */
+function isCjkCodePoint(cp: number): boolean {
+  return (
+    (cp >= 0x3000 && cp <= 0x303f) || // 中日韩符号与标点
+    (cp >= 0x3040 && cp <= 0x30ff) || // 平假名、片假名
+    (cp >= 0x3400 && cp <= 0x4dbf) || // 汉字扩展 A
+    (cp >= 0x4e00 && cp <= 0x9fff) || // 汉字
+    (cp >= 0xf900 && cp <= 0xfaff) || // 兼容汉字
+    (cp >= 0xac00 && cp <= 0xd7af) || // 谚文音节
+    (cp >= 0xff00 && cp <= 0xff60) || // 全角 ASCII 与全角标点
+    (cp >= 0xff65 && cp <= 0xff9f) // 半角片假名
+  )
+}
+
+function isCjk(char: string): boolean {
+  return char !== '' && isCjkCodePoint(char.codePointAt(0)!)
+}
+
+/**
+ * 把展示用的**折行**拼成一行连续文本。
+ *
+ * **不能一律换成空格——这是检索召回率最隐蔽的一处流失。**
+ *
+ * 折行是排版需要，不是词与词的分界。字幕组把一句「今天我们来探店这家火锅店」
+ * 排成两行显示时，文件里写的是 `今天我们来\N探店这家火锅店`；用户眼里它
+ * 仍然是「今天我们来探店这家火锅店」。中间补一个空格，就把「探店」劈成了
+ * 「探 店」——搜「探店」从此**零结果**，而且不报任何错，看起来只是
+ * 「这词没出现过」。SRT/VTT 的折行同理（那里是真实换行符）。
+ *
+ * 但也不能一律相接：拉丁文字的词间本来就有空格，折行处若直接相接会把
+ * 两个词粘成一个（`Hello\Nworld` → `Helloworld`），既搜不到 "Hello world"，
+ * 片段显示出来也是坏的。所以判据是折行**两侧的字符**：
+ * 只有两侧都是中日韩文字时才不补空格。
+ *
+ * （行内的 `{\k20}` 这类标签同理，剥掉后也是不补空格的——
+ * 「火{\k20}锅店」本来就是一个词。见 cleanCueText。）
+ */
+function joinDisplayLines(parts: readonly string[]): string {
+  let out = ''
+  /** 已拼接内容的最后一个码点，用来判断要不要补空格 */
+  let tail = ''
+
+  for (const raw of parts) {
+    const part = raw.trim()
+    if (part === '') continue
+
+    // 用码点数组取首尾，不能让 emoji 这类代理对被从中间切开
+    const chars = [...part]
+    if (out !== '' && !(isCjk(tail) && isCjk(chars[0] ?? ''))) out += ' '
+
+    out += part
+    tail = chars[chars.length - 1] ?? ''
+  }
+
+  return out
+}
+
+/**
  * 洗掉字幕里的**标记**，只留给人看的文字。
  *
  * 顺序要紧：先处理矢量绘图，再剥 `{}` 标签。反过来的话，
  * `{\p1}m 0 0 l 100 0{\p0}` 这种绘图指令会留下一串坐标数字混进正文。
+ *
+ * `html` 决定要不要处理 HTML / VTT 那一套标记（`<i>`、`<v 说话人>`、`&amp;`）。
+ * **必须分格式，不能一律剥**：`<` `>` 在 ASS 里就是普通字符，
+ * 一律当标签剥会把「他<小声>说了一句话」吃掉一半，同样是静默的。
  */
-function cleanCueText(raw: string): string {
-  return raw
+function cleanCueText(raw: string, html: boolean): string {
+  let text = raw
     // ASS 矢量绘图：{\p1} 开始、{\p0} 结束，中间是坐标而不是文字。
     // 动漫字幕的标题字、歌词特效大量使用，不处理会污染检索结果。
     .replace(/\{\\p[1-9]\d*\}([\s\S]*?)(?=\{\\p0\}|$)/g, '')
     // ASS 覆盖标签：{\pos(..)} {\an8} {\k20} {\c&H..&} 等等，一律丢弃
     .replace(/\{[^}]*\}/g, '')
-    // ASS 硬换行 \N、软换行 \n、不换行空格 \h
-    .replace(/\\[Nnh]/g, ' ')
+    // \h 是不换行空格，它本身就是个空格，不是折行
+    .replace(/\\h/g, ' ')
+
+  if (html) {
     // VTT 内联标签：<v Speaker> <i> <c.class> <00:00:01.000>
-    .replace(/<[^>]*>/g, '')
+    text = text.replace(/<[^>]*>/g, '')
     // 实体
-    .replace(/&(?:amp|lt|gt|quot|#39|nbsp);/g, (m) => ENTITIES[m] ?? m)
-    // 字幕里的换行只是排版折行，不是语义分段，压成一行让检索片段更好读
+    text = text.replace(/&(?:amp|lt|gt|quot|#39|nbsp);/g, (m) => ENTITIES[m] ?? m)
+  }
+
+  // 折行统一走一处：ASS 的 \N/\n 与 SRT/VTT 的真实换行都在这儿合并成一行
+  return joinDisplayLines(text.split(/\r\n|\r|\n|\\[Nn]/))
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -117,7 +186,10 @@ function parseTimedCues(content: string): SubtitleCue[] {
       pending.pop()
     }
 
-    const text = cleanCueText(pending.join('\n'))
+    // html=true：SRT/VTT 的 `<i>`、`<v 说话人>`、`&amp;` 该剥。
+    // 折行交给 cleanCueText 里的 joinDisplayLines 处理——它会分辨
+    // 中日韩与拉丁，不会在「探/店」之间塞进一个空格。
+    const text = cleanCueText(pending.join('\n'), true)
     if (text !== '') cues.push({ text, startMs, endMs })
 
     pending = []
@@ -208,7 +280,8 @@ function parseAssCues(content: string): SubtitleCue[] {
     const start = ASS_TIME.exec(fields[startIndex] ?? '')
     const end = ASS_TIME.exec(fields[endIndex] ?? '')
 
-    const cleaned = cleanCueText(text)
+    // html=false：`<` `>` 在 ASS 里是普通字符，不能当标签剥
+    const cleaned = cleanCueText(text, false)
     if (cleaned === '') continue
 
     cues.push({

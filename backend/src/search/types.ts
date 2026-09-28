@@ -71,9 +71,23 @@ export interface SearchHit {
   matchedNames: string[]
   /** 命中的标签名 */
   matchedTags: string[]
-  /** 正文命中片段，每个素材最多几条 */
+  /**
+   * 正文命中片段。
+   *
+   * **这里是该素材命中的全部片段**，不再只给前几条——界面上「展开全部」
+   * 要用的就是它。默认折叠显示几条纯属**界面的事**（见前端
+   * api/search.ts 的 COLLAPSED_SEGMENT_COUNT），接口这一层不替用户做减法：
+   * 只给三条的话，「展开全部」就成了一个点不动的空按钮。
+   * 唯一的上限是 MAX_SEGMENTS_PER_ASSET，那是防内存的兜底，不是展示条数。
+   */
   segments: SegmentHit[]
-  /** 正文命中总段数（可能大于 segments.length，因为只展示前几条） */
+  /**
+   * 正文命中总段数。
+   *
+   * 正常情况下就等于 segments.length；只有单素材命中数超过
+   * MAX_SEGMENTS_PER_ASSET 时才会更大，此时界面要如实说明
+   * 「共 N 段，只带了 M 段」，不能让用户以为已经看全了。
+   */
   segmentHitCount: number
   /** 排序档次，越小越靠前。见 rank.ts */
   tier: number
@@ -94,12 +108,25 @@ export interface SearchOptions {
   kind?: AssetKind | undefined
   extractStatus?: ExtractStatus | undefined
   directoryId?: number | undefined
-  /** 每个素材最多展示几条正文片段 */
+  /**
+   * 每个素材最多带回几条正文片段。
+   *
+   * 默认 MAX_SEGMENTS_PER_ASSET。这是**兜底上限**（防超大素材吃光内存），
+   * 不是展示条数——展示几条由前端折叠/展开决定，所以这里给得很宽。
+   */
   segmentsPerAsset?: number | undefined
   limit?: number | undefined
   offset?: number | undefined
 }
 
-export const DEFAULT_SEGMENTS_PER_ASSET = 3
+/**
+ * 单个素材最多带回多少条正文片段。
+ *
+ * 为什么有上限却不设成 3：接口要把命中的片段**全给前端**，否则
+ * 「展开全部」无从展开。那为什么还要有上限：`recall.ts` 的
+ * MAX_SEGMENT_ROWS 是**全局**兜底，一个命中 2000 段的素材仍能独占整页，
+ * 把后面所有素材挤出结果。100 段对「展开全部」早已远超任何人会读的量。
+ */
+export const MAX_SEGMENTS_PER_ASSET = 100
 export const DEFAULT_SEARCH_LIMIT = 30
 export const MAX_SEARCH_LIMIT = 200

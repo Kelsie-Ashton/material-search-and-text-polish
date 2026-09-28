@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Db } from '../db/index.js'
 import { createTestDb } from '../test/temp-db.js'
 import { search } from './index.js'
+import { MAX_SEGMENTS_PER_ASSET } from './types.js'
 
 /**
  * 检索的集成测试。
@@ -307,7 +308,7 @@ describe('检索', () => {
   })
 
   describe('正文片段', () => {
-    it('每个素材最多展示约定条数的片段，但计数是真实总数', () => {
+    it('带回命中的全部片段，供界面折叠与展开', () => {
       seed([
         {
           fileName: 'a.mp4',
@@ -317,19 +318,61 @@ describe('检索', () => {
 
       const hit = resultOf('火锅店').items[0]
 
-      // 一个素材有几千条命中时，不限制会让它一个人吃光整个结果页
-      expect(hit?.segments).toHaveLength(3)
-      // 计数必须是真的，否则界面会显示「共 3 段」而其实有 4 段
+      // 曾经这里只回 3 条，于是界面上的「展开全部」是个点不动的空按钮。
+      // 「默认只显示 3 条」是前端折叠状态的取值，不是接口该做的减法。
+      expect(hit?.segments).toHaveLength(4)
+      // 按钮上的条数取自这里，计数不实按钮就在撒谎
       expect(hit?.segmentHitCount).toBe(4)
     })
 
-    it('可以调整每个素材的片段条数', () => {
-      seed([{ fileName: 'a.mp4', segments: ['火锅店一', '火锅店二', '火锅店三'] }])
+    it('受上限截断时，计数照旧报真实总数', () => {
+      seed([
+        {
+          fileName: 'a.mp4',
+          segments: ['火锅店一', '火锅店二', '火锅店三', '火锅店四', '火锅店五'],
+        },
+      ])
 
-      const result = search(db, '火锅店', { segmentsPerAsset: 1 })
+      const result = search(db, '火锅店', { segmentsPerAsset: 2 })
 
       expect(result.ok).toBe(true)
-      if (result.ok) expect(result.value.items[0]?.segments).toHaveLength(1)
+      if (result.ok) {
+        // 少带几段是为了别让一个素材吃光整页；界面据此如实说明「共 5 段」
+        expect(result.value.items[0]?.segments).toHaveLength(2)
+        expect(result.value.items[0]?.segmentHitCount).toBe(5)
+      }
+    })
+
+    it('命中数超过召回上限时，计数与结果都不打折扣', () => {
+      // 片段有全局上限（recall.ts 的 MAX_SEGMENT_ROWS = 2000，防止超大素材
+      // 把内存吃光）。这条上限以前会同时坏掉两件事：
+      //
+      // 1. **计数**：总数是从被截断的那批行里数出来的，于是命中 2500 段的
+      //    素材被报成「共 2000 段」。用户拿这个词回字幕里一对就发现对不上，
+      //    从此连别的数字也不信了。
+      // 2. **结果**：额度被 a 用光之后，b 一段都取不回来，而「一段都没取回来」
+      //    在旧实现里就等于「没命中」——b 那张卡片直接消失。用户搜一个词，
+      //    某个文件明明有几十处，列表里却连它都没有。这比数字差几条严重得多。
+      //
+      // 两条召回路径都要走一遍：长词走 FTS、短词走 LIKE，取行方式不同，
+      // 但受同一个全局上限约束。
+      const flooding = Array.from({ length: 2500 }, (_, i) => `第${i}段有火锅店`)
+      seed([
+        { fileName: 'a.mp4', segments: flooding },
+        { fileName: 'b.mp4', segments: ['这里也有火锅店'] },
+      ])
+
+      for (const keyword of ['火锅店', '火锅']) {
+        const items = resultOf(keyword).items
+        const a = items.find((item) => item.asset.fileName === 'a.mp4')
+        const b = items.find((item) => item.asset.fileName === 'b.mp4')
+
+        expect(a?.segmentHitCount, `${keyword}：计数要如实`).toBe(2500)
+        // 带回来的条数仍然受每素材上限约束——那是设计值，不是 bug
+        expect(a?.segments, `${keyword}：每素材上限照旧`).toHaveLength(MAX_SEGMENTS_PER_ASSET)
+        expect(b, `${keyword}：命中少的素材不能消失`).toBeDefined()
+        expect(b?.segmentHitCount, `${keyword}：它的计数同样要如实`).toBe(1)
+      }
     })
   })
 

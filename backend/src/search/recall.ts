@@ -39,7 +39,14 @@ export interface RecallBucket {
 export interface SegmentRecall {
   /** assetId → 该素材命中的正文片段 */
   segments: Map<number, SegmentHit[]>
-  /** assetId → 该素材正文命中的总段数（可能大于片段数，只展示了前几条） */
+  /**
+   * assetId → 该素材正文命中的**总段数**，与实际带回了几条片段无关。
+   *
+   * 注意它的键可能比 `segments` 多：这里列的是**所有有命中的素材**，
+   * 而 `segments` 只装得下片段没被召回上限挤掉的那些。排序时要靠它把
+   * 被挤掉的素材补回来，否则它们会整个从结果里消失
+   * （见 search/index.ts 的 collectCandidates）。
+   */
   counts: Map<number, number>
   /** assetId → 该素材所有命中段里最小的 bm25（越小越相关）。纯 LIKE 命中时缺失。 */
   bestRanks: Map<number, number>
@@ -199,6 +206,35 @@ export function recallTags(
   return buckets
 }
 
+/**
+ * 按素材统计正文命中的**总段数**。
+ *
+ * 为什么必须单独数一次，而不是从带回来的那批片段里数：片段有全局上限
+ * （MAX_SEGMENT_ROWS，防止超大素材把内存吃光），而从被截断的结果里去数，
+ * 数出来的是「带回了多少」而不是「命中多少」。一个素材命中 5000 段时，
+ * 界面会言之凿凿地说「正文共命中 2000 段」——用户拿这个词回字幕里一对，
+ * 发现对不上，从此连别的数字也不信了。
+ *
+ * 这条查询只 GROUP BY 出 asset_id 与计数、**完全不取 text**，
+ * 所以不吃内存：返回行数由命中的素材数决定，与命中段数无关。
+ * 它顺带回答了「哪些素材有命中」——召回上限把某个素材的片段全挤掉时，
+ * 就靠这份计数让它仍然出现在结果里（见 search/index.ts 的 collectCandidates）。
+ */
+function countHitsByAsset(
+  db: Db,
+  from: string,
+  where: string,
+  params: unknown[],
+): Map<number, number> {
+  const rows = db
+    .prepare(
+      `SELECT s.asset_id AS asset_id, COUNT(*) AS n FROM ${from} WHERE ${where} GROUP BY s.asset_id`,
+    )
+    .all(...params) as Array<{ asset_id: number; n: number }>
+
+  return new Map(rows.map((row) => [row.asset_id, row.n]))
+}
+
 interface SegmentRow {
   id: number
   asset_id: number
@@ -242,6 +278,16 @@ export function recallSegmentsFts(
   const { sql: filterSql, params: filterParams } = filterClauses(filter)
   const termTexts = terms.map((term) => term.text)
 
+  // 命中总数单独数一次，不从下面那批被上限截断的行里数（见 countHitsByAsset）。
+  result.counts = countHitsByAsset(
+    db,
+    `fts_segments
+       JOIN asset_text_segments s ON s.id = fts_segments.rowid
+       JOIN assets a ON a.id = s.asset_id`,
+    `fts_segments MATCH ?${filterSql}`,
+    [matchExpression, ...filterParams],
+  )
+
   const rows = db
     .prepare(
       `WITH hits AS MATERIALIZED (
@@ -256,24 +302,20 @@ export function recallSegmentsFts(
        ),
        ranked AS (
          SELECT *,
-                ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY rank ASC) AS n,
-                COUNT(*)     OVER (PARTITION BY asset_id)                    AS total_hits
+                ROW_NUMBER() OVER (PARTITION BY asset_id ORDER BY rank ASC) AS n
            FROM hits
        )
-       SELECT id, asset_id, source, ordinal, text, start_ms, end_ms, frame_ms, rank, total_hits
+       SELECT id, asset_id, source, ordinal, text, start_ms, end_ms, frame_ms, rank
          FROM ranked
         WHERE n <= ?
         ORDER BY rank ASC`,
     )
-    .all(matchExpression, ...filterParams, MAX_SEGMENT_ROWS, segmentsPerAsset) as Array<
-    SegmentRow & { total_hits: number }
-  >
+    .all(matchExpression, ...filterParams, MAX_SEGMENT_ROWS, segmentsPerAsset) as SegmentRow[]
 
   for (const row of rows) {
     const list = result.segments.get(row.asset_id) ?? []
     list.push(toSegmentHit(row, termTexts))
     result.segments.set(row.asset_id, list)
-    result.counts.set(row.asset_id, row.total_hits)
 
     // FTS 路径下 bm25 必然有值，这里判 null 只是为了让类型收窄——
     // 不写成断言是因为断言不会在真的为 null 时告诉我们
@@ -308,6 +350,16 @@ export function recallSegmentsLike(
   const params = shortTerms.map((term) => `%${escapeLikePattern(term.text)}%`)
   const termTexts = shortTerms.map((term) => term.text)
 
+  // 命中总数单独数一次。**这一条对 LIKE 路径尤其要紧**：下面那批行是按
+  // asset_id 顺序取的，命中集中在靠前的素材时，它们会把 2000 行的额度用光，
+  // 后面的素材一段都取不回来——从取回的行里数，这些素材会被报成「0 段」。
+  result.counts = countHitsByAsset(
+    db,
+    `asset_text_segments s JOIN assets a ON a.id = s.asset_id`,
+    `(${conditions})${filterSql}`,
+    [...params, ...filterParams],
+  )
+
   const rows = db
     .prepare(
       `SELECT s.id, s.asset_id, s.source, s.ordinal, s.text, s.start_ms, s.end_ms, s.frame_ms
@@ -319,12 +371,9 @@ export function recallSegmentsLike(
     )
     .all(...params, ...filterParams, MAX_SEGMENT_ROWS) as SegmentRow[]
 
-  // 每个素材只保留前 segmentsPerAsset 条。计数仍按实际命中总数来，
-  // 否则界面会显示「共 2 段」而其实有 50 段。
+  // 每个素材只保留前 segmentsPerAsset 条，避免一个素材占满整页。
   const perAssetTaken = new Map<number, number>()
   for (const row of rows) {
-    result.counts.set(row.asset_id, (result.counts.get(row.asset_id) ?? 0) + 1)
-
     const taken = perAssetTaken.get(row.asset_id) ?? 0
     if (taken >= segmentsPerAsset) continue
     perAssetTaken.set(row.asset_id, taken + 1)

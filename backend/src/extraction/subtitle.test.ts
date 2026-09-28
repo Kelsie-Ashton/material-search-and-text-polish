@@ -84,8 +84,21 @@ describe('SRT 解析', () => {
       '.srt',
     )
 
-    // 折行是排版，不是语义分段——压成一行，检索片段才好读
-    expect(cues).toEqual([{ text: '今天我们来 探店这家火锅店', startMs: 1000, endMs: 2000 }])
+    // 折行是排版，不是语义分段——压成一行，检索片段才好读。
+    // **而且不能补空格**：「探店」被折行劈开后补上空格，
+    // 用户搜「探店」就是零结果。这条以前断言的是 '今天我们来 探店这家火锅店'，
+    // 那是把 bug 写成了预期。
+    expect(cues).toEqual([{ text: '今天我们来探店这家火锅店', startMs: 1000, endMs: 2000 }])
+  })
+
+  it('拉丁字幕的折行仍然补空格，不把两个词粘在一起', () => {
+    const cues = parseSubtitle(
+      ['1', '00:00:01,000 --> 00:00:02,000', 'I went to the', 'store yesterday', ''].join('\n'),
+      '.srt',
+    )
+
+    // 拉丁文字的词间本就有空格，直接相接会变成 "thestore"，两个词都搜不到
+    expect(cues[0]?.text).toBe('I went to the store yesterday')
   })
 
   it('毫秒位少于三位时按左对齐补齐', () => {
@@ -236,13 +249,53 @@ describe('ASS / SSA 解析', () => {
     expect(cues[0]?.text).toBe('正式对白')
   })
 
-  it('\\N 硬换行变成空格而不是消失', () => {
+  it('\\N 硬换行不能把词劈开：两侧是中文时直接相接', () => {
+    // 这是**召回率**问题，不是排版问题。真实番剧字幕里 \N 无处不在，
+    // 一旦补成空格，「探店」「火锅店」这类跨行词就永远搜不到了——
+    // 而且不报错，看起来只是「这词没出现过」。
+    // 这条以前断言的是 '上半句 下半句'，那是把 bug 写成了预期。
     const cues = parseSubtitle(
-      ass('Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,上半句\\N下半句'),
+      ass('Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,今天我们来探\\N店吃火锅'),
       '.ass',
     )
 
-    expect(cues[0]?.text).toBe('上半句 下半句')
+    expect(cues[0]?.text).toBe('今天我们来探店吃火锅')
+    // 折行两侧原本若带空格，也要一并去掉，否则「探 店」照样搜不到
+    const padded = parseSubtitle(
+      ass('Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,今天我们来探 \\N 店吃火锅'),
+      '.ass',
+    )
+    expect(padded[0]?.text).toBe('今天我们来探店吃火锅')
+  })
+
+  it('\\n 软换行与 \\h 不换行空格分别处理', () => {
+    const cues = parseSubtitle(
+      ass('Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,锅底是祖传\\n配方\\h很香'),
+      '.ass',
+    )
+
+    // \n 是折行（可能会被排版引擎忽略），当断行处理；\h 是真空格，保留
+    expect(cues[0]?.text).toBe('锅底是祖传配方 很香')
+  })
+
+  it('拉丁字幕的 \\N 仍然补空格，不把两个词粘在一起', () => {
+    const cues = parseSubtitle(
+      ass('Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,I went to the\\Nstore'),
+      '.ass',
+    )
+
+    expect(cues[0]?.text).toBe('I went to the store')
+  })
+
+  it('ASS 里的尖括号是普通字符，不能当 VTT 标签剥掉', () => {
+    // `<` `>` 在 ASS 里没有标签含义。一律按 VTT 处理会把
+    // 「他<小声>说了一句话」静默吃掉一半，用户只会发现搜不到。
+    const cues = parseSubtitle(
+      ass('Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,他<小声>说了一句话'),
+      '.ass',
+    )
+
+    expect(cues[0]?.text).toBe('他<小声>说了一句话')
   })
 
   it('以 Format 行为准，而不是硬编码第 10 列', () => {
