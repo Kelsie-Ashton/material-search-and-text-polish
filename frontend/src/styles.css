@@ -933,3 +933,18 @@ code {
   font-weight: 400;
   color: var(--muted);
 }
+
+/* 润色结果是「成品」，与上面「提取文本」那串原始段落要在视觉上分得开：
+   左边缘的竖线 + 稍大的行距，一眼看出这是整理过的成段文字，不是列表项。 */
+.polish-body {
+  margin: 10px 0 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--accent, #4a7);
+  border-radius: 0 6px 6px 0;
+  background: var(--surface-2, rgba(127, 127, 127, 0.07));
+  font-size: 14px;
+  line-height: 1.75;
+  /* 结果里可能有换行，也可能有很长的句子——都要原样显示，不能折叠成一行 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}

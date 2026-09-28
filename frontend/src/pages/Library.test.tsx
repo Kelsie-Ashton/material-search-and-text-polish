@@ -45,6 +45,13 @@ let detailExtras: Record<number, Record<string, unknown>>
 let extractionResponse: unknown
 /** 取提取文本的响应体 */
 let segmentsResponse: unknown
+/** 润色可用性。默认「未配置」——这是最常见的初始状态 */
+let polishAvailability: unknown
+/** 读润色结果（GET）的响应体 */
+let polishState: unknown
+/** 发起润色（POST）的响应体，或 { status, error } 形式的失败 */
+let polishResponse: unknown
+let polishRequests: number
 
 function json(body: unknown, status = 200): Response {
   return {
@@ -65,6 +72,10 @@ beforeEach(() => {
   detailExtras = {}
   extractionResponse = { ok: true, value: { items: [], total: 0 } }
   segmentsResponse = { ok: true, value: { items: [], total: 0 } }
+  polishAvailability = { ok: true, value: { available: false, reason: 'not_configured' } }
+  polishState = { ok: true, value: { result: null, lastFailure: null } }
+  polishResponse = { ok: true, value: { status: 'done', result: null } }
+  polishRequests = 0
 
   vi.stubGlobal(
     'fetch',
@@ -107,6 +118,27 @@ beforeEach(() => {
       if (url.includes('/api/jobs/') && method === 'GET') {
         const next = jobQueue.shift()
         return json({ ok: true, value: next })
+      }
+
+      // 润色：可用性、读结果、发起。
+      if (url.includes('/api/settings/polish-availability')) {
+        return json(polishAvailability)
+      }
+
+      if (/\/api\/polish\/assets\/\d+$/.test(url) && method === 'GET') {
+        return json(polishState)
+      }
+
+      if (/\/api\/polish\/assets\/\d+$/.test(url) && method === 'POST') {
+        polishRequests += 1
+        if (!('ok' in (polishResponse as Record<string, unknown>))) {
+          const failure = polishResponse as { status: number; error: unknown }
+          return json({ ok: false, error: failure.error }, failure.status)
+        }
+        // 成功后 GET 就该读得到这条结果——替身不跟着变的话，
+        // 测的就是一个后端不会出现的状态
+        polishState = { ok: true, value: { result: (polishResponse as { value: { result: unknown } }).value.result, lastFailure: null } }
+        return json(polishResponse)
       }
 
       // 提取的两个端点。segments 要排在前面判断——它的路径是另一个的前缀。
@@ -560,6 +592,126 @@ describe('素材库页面', () => {
         timeout: 6000,
       })
       expect(within(screen.getByRole('table')).getByText('已提取')).toBeTruthy()
+    })
+  })
+  describe('润色入口', () => {
+    /** 一条已经提取过文字的素材——润色的前提 */
+    function usePolishedAsset(): void {
+      useAsset({ fileName: '探店.mp4', ext: '.mp4', kind: 'video', extractStatus: 'done' })
+      detailExtras[42] = { extractStatus: 'done', segmentCount: 3 }
+      segmentsResponse = {
+        ok: true,
+        value: { items: [{ id: 1, source: 'audio', ordinal: 0, text: '今天我们来探店', startMs: 0, endMs: 3000 }], total: 1 },
+      }
+    }
+
+    it('未配置凭证：按钮禁用，并指向设置页而不是笼统地说「不可用」', async () => {
+      usePolishedAsset()
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      const button = await screen.findByRole('button', { name: '润色成文案' })
+      expect((button as HTMLButtonElement).disabled).toBe(true)
+      // 「去设置页填 Key」是用户此刻唯一能做的事，
+      // 说成「暂时不可用」他就只能干等
+      expect(screen.getByText(/请先到设置页填写/)).toBeTruthy()
+    })
+
+    it('已配置但还没提取文字：按钮禁用，并说清要先提取', async () => {
+      // 这条与上一条必须给不同的话：一个要去设置页，一个要先提取。
+      // 两件事合起来说，用户会去做错的那一件。
+      useAsset({ fileName: '探店.mp4', ext: '.mp4', kind: 'video' })
+      polishAvailability = { ok: true, value: { available: true, model: 'claude-opus-5' } }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      const button = await screen.findByRole('button', { name: '润色成文案' })
+      expect((button as HTMLButtonElement).disabled).toBe(true)
+      expect(screen.getByText(/先在上面提取一次/)).toBeTruthy()
+    })
+
+    it('已配置且有文字：点一下就能看到润色结果，与原文同屏对照', async () => {
+      usePolishedAsset()
+      polishAvailability = { ok: true, value: { available: true, model: 'claude-opus-5' } }
+      polishResponse = {
+        ok: true,
+        value: {
+          status: 'done',
+          result: {
+            id: 1,
+            assetId: 42,
+            body: '今天我们来探店这家火锅店。',
+            model: 'claude-opus-5',
+            promptVersion: 'polish-v1',
+            inputTokens: 10,
+            outputTokens: 20,
+            createdAt: Date.now(),
+          },
+        },
+      }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      const button = await screen.findByRole('button', { name: '润色成文案' })
+      expect((button as HTMLButtonElement).disabled).toBe(false)
+      await user.click(button)
+
+      // 润色结果与上面的「提取文本」同屏，两处各有各的标题，分得清哪个是原文
+      expect(await screen.findByText('今天我们来探店这家火锅店。')).toBeTruthy()
+      expect(screen.getByText(/这里是整理后的版本/)).toBeTruthy()
+      expect(screen.getByText('文字提取')).toBeTruthy()
+    })
+
+    it('润色失败：把后端给的原因原样显示，并留下面板上的失败记录', async () => {
+      // 凭证无效、额度不足、网络不通要做的事完全不同，
+      // 换成一句笼统的「润色失败」等于把用户丢在原地
+      usePolishedAsset()
+      polishAvailability = { ok: true, value: { available: true, model: 'claude-opus-5' } }
+      polishResponse = {
+        status: 402,
+        error: { code: 'CREDENTIALS_BILLING', message: '账户额度不足，请前往服务商后台充值' },
+      }
+      polishState = {
+        ok: true,
+        value: {
+          result: null,
+          lastFailure: {
+            code: 'CREDENTIALS_BILLING',
+            message: '账户额度不足，请前往服务商后台充值',
+            createdAt: Date.now(),
+          },
+        },
+      }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      await user.click(await screen.findByRole('button', { name: '润色成文案' }))
+
+      // 两处都要有：顶部那条是本次操作的即时反馈，面板里这条是**留得住的记录**
+      // （刷新页面后仍在）。只留前者的话，用户一刷新就不知道刚才为什么没成。
+      expect(await screen.findByText(/上次润色失败：账户额度不足/)).toBeTruthy()
+      expect(screen.getByRole('status').textContent).toContain('账户额度不足')
+    })
+
+    it('未配置凭证时不会发出润色请求（不产生费用）', async () => {
+      usePolishedAsset()
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('探店.mp4'))
+
+      const button = await screen.findByRole('button', { name: '润色成文案' })
+      await user.click(button)
+
+      expect(polishRequests).toBe(0)
     })
   })
 })

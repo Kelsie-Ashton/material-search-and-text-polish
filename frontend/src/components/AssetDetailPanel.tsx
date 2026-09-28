@@ -11,6 +11,8 @@ import {
   startExtraction,
 } from '../api/extraction'
 import { type JobRecord, getJob } from '../api/jobs'
+import { type PolishState, fetchPolish, runPolish } from '../api/polish'
+import { type PolishAvailability, getPolishAvailability } from '../api/settings'
 import {
   type AssetDetail,
   KIND_LABELS,
@@ -73,6 +75,12 @@ export default function AssetDetailPanel({
   const [segments, setSegments] = useState<TextSegment[] | null>(null)
   const [segmentTotal, setSegmentTotal] = useState(0)
 
+  /** 润色状态。`null` 表示还没读回来——与「读回来了、但没有结果」是两回事。 */
+  const [polish, setPolish] = useState<PolishState | null>(null)
+  const [polishBusy, setPolishBusy] = useState(false)
+  /** 凭证可用性。null 表示还没问到；「未配置」是正常状态，不是错误。 */
+  const [availability, setAvailability] = useState<PolishAvailability | null>(null)
+
   const reload = useCallback(async () => {
     try {
       setDetail(await getAsset(assetId))
@@ -94,9 +102,28 @@ export default function AssetDetailPanel({
     }
   }, [assetId])
 
+  const reloadPolish = useCallback(async () => {
+    try {
+      setPolish(await fetchPolish(assetId))
+    } catch {
+      // 读不到润色结果不该让整个面板变成错误页——上面那些元信息仍然有用。
+      // 所以这里刻意**不报错也不设 notice**：用户此刻要的可能是提取或标签，
+      // 为一条读不回来的润色结果弹一个红条，只会让人以为整条素材坏了。
+      setPolish({ result: null, lastFailure: null })
+    }
+  }, [assetId])
+
   useEffect(() => {
     void reload()
-  }, [reload])
+    void reloadPolish()
+    // 可用性只问一次：面板活着的期间用户不可能去改设置（那在另一个页面，
+    // 一导航这个面板就卸载了）。所以回来时必然是一次新的挂载、新的一次询问。
+    void getPolishAvailability()
+      .then(setAvailability)
+      // 问不到就当作「不可用」。反过来（当作可用）会让用户点一个必然失败的
+      // 按钮，然后拿到一句他无法处理的报错。
+      .catch(() => setAvailability({ available: false, reason: 'not_configured' }))
+  }, [reload, reloadPolish])
 
   // 详情里说了「已有 N 段文本」却拿不出来，是最让人困惑的一种空。
   // 只要那边报了有内容，这边就去取。
@@ -207,6 +234,26 @@ export default function AssetDetailPanel({
     }
   }
 
+  async function handlePolish() {
+    setPolishBusy(true)
+    setNotice(null)
+    try {
+      const { result } = await runPolish(assetId)
+      setPolish({ result, lastFailure: null })
+      setNotice({ kind: 'ok', text: '润色完成。原始文本没有被改动。' })
+    } catch (err) {
+      // 失败原因后端已经写得很具体（凭证无效 / 额度不足 / 网络不通 / 太长），
+      // 直接展示，不要替换成笼统的「操作失败」——这几种情况用户要做的事
+      // 完全不同，而它们现在都指向设置页那一块。
+      setNotice({ kind: 'error', text: toUserMessage(err) })
+      // 失败也要重新读一遍：后端会留下这条失败记录，
+      // 界面上「上次为什么没成」那一句得跟着更新
+      await reloadPolish()
+    } finally {
+      setPolishBusy(false)
+    }
+  }
+
   async function handleAddTag() {
     const name = newTag.trim()
     if (name === '') return
@@ -278,6 +325,26 @@ export default function AssetDetailPanel({
 
   const plan = extractionPlan(detail)
   const extractRunning = extractJob !== null
+
+  // 润色按钮能不能点，以及点不了时的那句话。
+  //
+  // 三个条件缺一不可，而**每一个的「为什么点不了」都不一样**：
+  // 没配凭证要去设置页、没提取要先提取、正在跑要等。合并成一句
+  // 「暂时不可用」等于把用户丢在原地。
+  const hasText = detail.segmentCount > 0
+  const canPolish =
+    availability?.available === true && hasText && !polishBusy && !extractRunning
+
+  const polishHint =
+    availability === null
+      ? '正在检查润色是否可用…'
+      : !availability.available
+        ? availability.reason === 'store_corrupt'
+          ? '凭证文件读不出来，润色暂时不可用。请到设置页重新填写 API Key。'
+          : '润色需要一个云端模型的 API Key，请先到设置页填写。检索、标签与文字提取都不受影响。'
+        : !hasText
+          ? '这条素材还没有提取出文字。先在上面提取一次，它的文字才能拿来润色。'
+          : '会把这条素材提取出的文字发给你在设置页配置的模型。这是一次真实的云端调用，会产生费用；原始文本不会被改动。'
 
   return (
     <aside className="detail-panel">
@@ -438,6 +505,58 @@ export default function AssetDetailPanel({
           这条素材现在还不能提取。能直接提取的是：字幕文件（不需要模型）、音频与视频（本地语音转写）。
         </div>
       ) : null}
+
+      {/* ---------------------------------------------------------- 润色 */}
+
+      <div className="detail-section">
+        <h4 className="detail-subtitle">润色成文案</h4>
+
+        <div className="extract-action">
+          <button
+            type="button"
+            disabled={!canPolish}
+            title={canPolish ? undefined : polishHint}
+            onClick={() => void handlePolish()}
+          >
+            {polishBusy ? '润色中…' : polish?.result ? '重新润色' : '润色成文案'}
+          </button>
+          {polish?.result ? (
+            <span className="muted">上次润色：{formatTime(polish.result.createdAt)}</span>
+          ) : null}
+        </div>
+
+        {/* 禁用的按钮如果不说原因，用户只会以为程序坏了 */}
+        <p className="field-hint">{polishHint}</p>
+
+        {polishBusy ? (
+          <p className="field-hint">
+            正在等模型返回。这一步要十几秒到一分钟，期间请不要重复点击——每点一次都会产生一次费用。
+          </p>
+        ) : null}
+
+        {/* 润色结果与上面的「提取文本」是**同屏对照**的：
+            原文在上面、整理后的版本在这里，两处标题与样式都不同，
+            用户一眼能分清哪个是原始素材、哪个是模型改过的。 */}
+        {polish?.result ? (
+          <>
+            <div className="polish-body">{polish.result.body}</div>
+            <p className="field-hint">
+              上面「提取文本」是原始素材里说的话，这里是整理后的版本——对照着看。用{' '}
+              {polish.result.model} 生成
+              {polish.result.outputTokens !== null
+                ? `，输出 ${polish.result.outputTokens} tokens`
+                : ''}
+              。
+            </p>
+          </>
+        ) : null}
+
+        {/* 「没有结果」有两种完全不同的原因：从没跑过、跑过但失败。
+            只显示一个空，用户分不出来，也就不知道该不该再点一次。 */}
+        {polish !== null && polish.result === null && polish.lastFailure !== null ? (
+          <div className="notice notice-error">上次润色失败：{polish.lastFailure.message}</div>
+        ) : null}
+      </div>
 
       {/* ---------------------------------------------------------- 标签 */}
 
