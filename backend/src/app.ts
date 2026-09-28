@@ -7,9 +7,11 @@ import { frontendDistDir } from './config.js'
 import { type CredentialsStore, credentialsStore } from './credentials/store.js'
 import type { Db } from './db/index.js'
 import type { JobQueue } from './jobs/queue.js'
+import type { PolishDeps } from './polish/service.js'
 import { createExtractionRouter } from './routes/extraction.js'
 import { createJobsRouter } from './routes/jobs.js'
 import { createLibraryRouter } from './routes/library.js'
+import { createPolishRouter } from './routes/polish.js'
 import { createSearchRouter } from './routes/search.js'
 import { createSettingsRouter } from './routes/settings.js'
 
@@ -22,6 +24,12 @@ export interface AppOptions {
   /** 索引数据库。与 jobQueue 同时提供时才会挂载素材库路由。 */
   db?: Db
   jobQueue?: JobQueue
+  /**
+   * 润色的可替换依赖。只为了测试而存在——真实调用会花钱，
+   * 拿不到桩替身就没法在测试里走通这条路（与 `jobs/handlers.ts`
+   * 的 `HandlerDeps` 同一个理由）。
+   */
+  polishDeps?: PolishDeps
 }
 
 /**
@@ -30,6 +38,10 @@ export interface AppOptions {
  */
 export function createApp(options: AppOptions = {}) {
   const app = express()
+
+  // 凭证存储解析一次、多处使用（设置页与润色都要）。同一份实例很要紧：
+  // 润色读的就是设置页刚写进去的那把 Key，两个实例会各自缓存文件内容。
+  const store = options.credentialsStore ?? credentialsStore
 
   app.use(express.json({ limit: '1mb' }))
 
@@ -45,10 +57,7 @@ export function createApp(options: AppOptions = {}) {
   })
 
   // 凭证路由不需要 db；偏好路由需要，因此 db 可缺省（见 settings.ts 里的说明）
-  api.use(
-    '/settings',
-    createSettingsRouter(options.credentialsStore ?? credentialsStore, options.db),
-  )
+  api.use('/settings', createSettingsRouter(store, options.db))
 
   // 素材库路由依赖数据库与任务队列。二者缺一就不挂载——
   // 但这不是「可选功能」：真实入口 index.ts 一定会传，
@@ -75,7 +84,11 @@ export function createApp(options: AppOptions = {}) {
     api.use('/jobs', createJobsRouter(options.db, options.jobQueue))
   }
 
-  // 后续路由（polish）在此挂载
+  // 润色需要数据库（素材与结果）与凭证存储，两者都齐才挂载。
+  // 它**不需要**任务队列——当前是同步执行的，理由见 routes/polish.ts。
+  if (options.db) {
+    api.use('/polish', createPolishRouter(options.db, store, options.polishDeps ?? {}))
+  }
 
   app.use('/api', api)
 
