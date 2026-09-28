@@ -49,6 +49,13 @@ describe('提取路由', () => {
     })
   }
 
+  /** 在临时目录里落一个真实纯文本文件并建好素材记录 */
+  function textAsset(name: string, ext: string, content: string) {
+    const file = path.join(workDir, name)
+    fs.writeFileSync(file, content)
+    return createAsset(db, directoryId, { fileName: name, path: file, ext, kind: 'text' })
+  }
+
   beforeEach(() => {
     db = createTestDb()
     // 队列只入队、不启动消费：这里的测试关心的是「请求有没有正确地把活交出去」，
@@ -95,20 +102,81 @@ describe('提取路由', () => {
       expect(res.body.error.details).toMatchObject({ ext: '.png' })
     })
 
-    it('纯文本文件说的是「要先判定编码」，不是「需要识别引擎」', async () => {
-      // `.txt` 本身就已经是文字，说它需要识别引擎会让人以为连读个 txt 都要下模型。
-      // 它真正的障碍是编码：中文纯文本大量是 GBK，判定错了就是整篇乱码进索引。
-      // 两句话长得像，但对用户来说是完全不同的两件事。
-      const asset = createAsset(db, directoryId, { fileName: '笔记.txt', ext: '.txt', kind: 'text' })
+    it('纯文本按行读入，没有时间轴', async () => {
+      // 纯文本与字幕的唯一区别就是没有时间轴。`.txt` 以前被挡在门外，
+      // 理由写的是「要先判定编码」——那件事已经做完了（与字幕共用
+      // decodeSubtitleText 的 BOM → 严格 UTF-8 → GBK 判定），所以它该能读了。
+      const asset = textAsset('歌词.txt', '.txt', '第一句歌词\n\n第二句歌词\n')
+
+      const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.value.mode).toBe('imported')
+      expect(res.body.value.segmentCount).toBe(2)
+
+      const segments = await request(app).get(`/api/extraction/assets/${asset.id}/segments`)
+      // 空行是排版，不是内容——它不该变成一个搜不出东西的空段落
+      expect(segments.body.value.items.map((s: { text: string }) => s.text)).toEqual([
+        '第一句歌词',
+        '第二句歌词',
+      ])
+      // 没有时间轴：null 而不是 0。0 会被界面显示成 00:00，
+      // 让人以为这行字出现在文件开头，而实际上我们根本不知道它在哪儿。
+      expect(segments.body.value.items[0].startMs).toBeNull()
+    })
+
+    it('.json 也走同一条路，不需要额外的东西', async () => {
+      const asset = textAsset('转写.json', '.json', '{\n"text": "今天我们来探店这家火锅店"\n}')
+
+      const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
+
+      expect(res.status).toBe(200)
+      expect(res.body.value.mode).toBe('imported')
+
+      const segments = await request(app).get(`/api/extraction/assets/${asset.id}/segments`)
+      // 按纯文本读，所以 JSON 的语法符号会原样留在段落里（`{` 自成一个段落）。
+      // 这不是解析错误，也不打算修：真要结构化解析 JSON（比如带时间轴的
+      // Whisper 输出），得先确定认哪几种方言，那是另一件事。
+      // 关键是**词照样搜得到**——下面这条断言才是这个功能存在的理由。
+      expect(segments.body.value.items.map((s: { text: string }) => s.text)).toEqual([
+        '{',
+        '"text": "今天我们来探店这家火锅店"',
+        '}',
+      ])
+    })
+
+    it('没能直接读取的文本格式：说的是「还不能读」，不是「需要识别引擎」', async () => {
+      // config.ts 里 text 那一档的扩展名现在与「可直接导入」完全一致，
+      // 所以这条分支目前只有「往 config 加了扩展名、却忘了在 importer 里接上」
+      // 才会走到。用 .log 模拟那一天。
+      //
+      // 关键是这两句话不能说反：说一个文本文件「需要识别引擎」，
+      // 用户会以为读个日志都要下模型，然后往完全错误的方向排查。
+      const asset = textAsset('日志.log', '.log', '随便什么内容')
 
       const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
 
       expect(res.status).toBe(501)
-      expect(res.body.error.message).toContain('编码')
-      // 断言的是「没有说它需要引擎」这件事本身，而不是「不含『识别引擎』四个字」——
-      // 正确的文案里恰恰有「不需要识别引擎」，按字面去否定会把对的判成错的。
-      expect(res.body.error.message).toContain('不需要识别引擎')
-      expect(res.body.error.message).not.toContain('需要本地识别引擎')
+      expect(res.body.error.message).toContain('不能直接读进索引')
+      expect(res.body.error.message).not.toContain('识别引擎')
+    })
+
+    it('读不出来的文本文件：记成提取失败并说明原因，不把请求打崩', async () => {
+      // 索引里有、磁盘上没了——用户手工删了文件就会这样。
+      // 这是**用户点一下按钮就会走到**的路径，一旦抛出去就是 500，
+      // 用户看到一句「服务器错误」，而真正的原因哪儿都没留下。
+      const asset = createAsset(db, directoryId, {
+        fileName: '不在了.txt',
+        path: path.join(workDir, '不在了.txt'),
+        ext: '.txt',
+        kind: 'text',
+      })
+
+      const res = await request(app).post(`/api/extraction/assets/${asset.id}`)
+
+      expect(res.status).toBe(500)
+      expect(res.body.error.code).toBe('EXTRACTION_FAILED')
+      expect(res.body.error.message).toContain('无法读取')
     })
 
     it('音视频返回 202 与任务 id，而不是傻等它跑完', async () => {

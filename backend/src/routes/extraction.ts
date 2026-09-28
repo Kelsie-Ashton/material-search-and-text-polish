@@ -2,9 +2,13 @@ import { Router } from 'express'
 
 import type { Db } from '../db/index.js'
 import { syncAssetExtractStatus } from '../extraction/asset-status.js'
-import { importSubtitleText, listSegments } from '../extraction/importer.js'
+import {
+  DIRECT_IMPORT_EXTENSIONS,
+  canImportDirectly,
+  importTextFile,
+  listSegments,
+} from '../extraction/importer.js'
 import { isMediaKind } from '../extraction/media.js'
-import { SUBTITLE_EXTENSIONS, isSubtitleExtension } from '../extraction/subtitle.js'
 import { findAsset } from '../library/assets.js'
 import type { JobQueue } from '../jobs/queue.js'
 import { sendResult } from '../shared/http.js'
@@ -50,15 +54,15 @@ export function createExtractionRouter(db: Db, queue?: JobQueue): Router {
       return
     }
 
-    // 提取按文件类型分派。字幕文件的文字本就现成，直接解析；
-    // 音视频要「认出」文字，得跑本地语音模型，因此入队。
+    // 提取按文件类型分派。文本类素材（字幕与纯文本）的文字本就现成，
+    // 读出来即可；音视频要「认出」文字，得跑本地语音模型，因此入队。
     //
     // 两条路径的**返回形状不同**（一条同步给结果，一条只给任务 id），
     // 而调用方必须能分辨自己拿到的是哪一种。所以两条各自带上 `mode`，
     // 让这个分派结果写在响应里，而不是让前端靠「有没有 jobId 字段」去猜——
     // 那种猜法在形状变动时会静默认错，而这正是本文件开头那两条路径的核心区别。
-    if (isSubtitleExtension(asset.ext)) {
-      const imported = importSubtitleText(db, id)
+    if (canImportDirectly(asset.ext)) {
+      const imported = importTextFile(db, id)
       sendResult(res, imported.ok ? ok({ mode: 'imported' as const, ...imported.value }) : imported)
       return
     }
@@ -89,21 +93,24 @@ export function createExtractionRouter(db: Db, queue?: JobQueue): Router {
       return
     }
 
-    // 「图片」与「其余纯文本」要走两条不同的说辞，不能共用一句话。
+    // 「图片」与「没能直接读取的文本」要走两条不同的说辞，不能共用一句话。
     //
     // 图片确实需要识别引擎（OCR），而 OCR 已按评估结论挂起（见 README 的未来规划）。
     //
-    // 但 `.txt` / `.md` / `.csv` 这些**本身就已经是文字**，说它们「需要识别引擎」
-    // 是错的——用户会以为程序连读个 txt 都要下模型。它们的真实障碍是另一件事：
-    // 中文纯文本大量是 GBK 编码，判定错了就是一整篇乱码进索引，比不导更糟。
+    // 但文本文件说它「需要识别引擎」是错的——用户会以为程序连读个 txt
+    // 都要下模型，然后往完全错误的方向排查。
+    //
+    // 这条 `kind === 'text'` 分支现在其实走不到：config.ts 里 text 那一档的
+    // 扩展名与 DIRECT_IMPORT_EXTENSIONS 完全一致，扫描器认作文本的都能直接导入
+    // （有一条测试钉住这个不变量）。留着它是为了「往 config 里加了扩展名、
+    // 却忘了在 importer 里接上」这种情况仍有一个说得通的回答。
     const message =
       asset.kind === 'text'
-        ? `「${asset.ext}」本身已经是文字，不需要识别引擎，但把它读进索引要先判定编码` +
-          `（中文纯文本常有 GBK），这一步将在下一批功能中提供。` +
-          `现在可以直接导入的是字幕文件（${SUBTITLE_EXTENSIONS.join(' / ')}）。`
+        ? `「${asset.ext}」是文本文件，但目前还不能直接读进索引。` +
+          `可以读取的是：${DIRECT_IMPORT_EXTENSIONS.join(' / ')}。`
         : `「${asset.ext}」的文字提取需要本地识别引擎（OCR），` +
-          `当前版本暂不提供。现在可以直接导入的是字幕文件` +
-          `（${SUBTITLE_EXTENSIONS.join(' / ')}），音频与视频可以走语音转写。`
+          `当前版本暂不提供。现在可以直接导入的是文本与字幕` +
+          `（${DIRECT_IMPORT_EXTENSIONS.join(' / ')}），音频与视频可以走语音转写。`
 
     sendResult(res, err('NOT_IMPLEMENTED', message, { ext: asset.ext, kind: asset.kind }))
   })

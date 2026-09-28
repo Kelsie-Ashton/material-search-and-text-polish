@@ -20,7 +20,7 @@ async function unwrap<T>(promise: Promise<unknown>): Promise<T> {
   return payload.value
 }
 
-/** 对应 backend/src/extraction/importer.ts 的 ImportSubtitleResult */
+/** 对应 backend/src/extraction/importer.ts 的 ImportTextResult */
 export interface ImportedExtraction {
   mode: 'imported'
   assetId: number
@@ -44,8 +44,8 @@ export type StartExtractionResult = ImportedExtraction | QueuedExtraction
 /**
  * 发起提取。音视频只返回任务 id，进度要去 `api/jobs.ts` 轮询。
  *
- * 不可提取的类型（图片 / 纯文本）会抛 `ApiRequestError`，`code` 为
- * `NOT_IMPLEMENTED`，`message` 是一句能直接展示给用户的中文说明。
+ * 不可提取的类型（图片）会抛 `ApiRequestError`，`code` 为 `NOT_IMPLEMENTED`，
+ * `message` 是一句能直接展示给用户的中文说明。
  */
 export function startExtraction(assetId: number): Promise<StartExtractionResult> {
   return unwrap<StartExtractionResult>(apiPost(`/api/extraction/assets/${assetId}`))
@@ -82,7 +82,9 @@ export function listSegments(
 
 /** 段落来源的中文名。未知来源如实回显，不要吞掉。 */
 export const SOURCE_LABELS: Record<string, string> = {
-  file: '字幕解析',
+  // 字幕与纯文本的 source 都是 `file`，所以这里不能写「字幕解析」——
+  // 一份 .txt 歌词的段落会被标成字幕，用户会以为程序把它当字幕解析了。
+  file: '文本解析',
   asr: '语音转写',
   ocr: '画面识别',
 }
@@ -132,7 +134,7 @@ export function extractionPlan(asset: Pick<AssetDetail, 'kind' | 'ext'>): Extrac
     }
   }
 
-  // 文本类里只有字幕能直接导。其余纯文本的障碍是编码判定，不是识别引擎。
+  // 文本类素材都能直接读，不需要任何识别模型。两类只差有没有时间轴。
   if (SUBTITLE_EXTENSIONS.includes(asset.ext.toLowerCase())) {
     return {
       label: '导入字幕文字',
@@ -141,23 +143,42 @@ export function extractionPlan(asset: Pick<AssetDetail, 'kind' | 'ext'>): Extrac
     }
   }
 
+  if (PLAIN_TEXT_EXTENSIONS.includes(asset.ext.toLowerCase())) {
+    return {
+      label: '导入文本文字',
+      available: true,
+      hint: '按行读入、按行入库，没有时间轴。中文纯文本常见的 GBK 编码会自动识别。',
+    }
+  }
+
   return {
     label: '提取文字',
     available: false,
-    hint: `「${asset.ext}」本身已经是文字，但读进索引要先判定编码（中文纯文本常有 GBK），当前版本暂不提供。`,
+    hint: `「${asset.ext}」是文本文件，但目前还不能直接读进索引。`,
   }
 }
 
 /**
- * 可直接解析的字幕扩展名。
+ * 这次导入读进来的是字幕还是文本，用来把提示语说准。
  *
- * 与 `backend/src/extraction/subtitle.ts` 的 `SUBTITLE_EXTENSIONS` 重复了一份。
- * 接受这份重复，是因为它只用来决定**按钮上的字**：漏掉一个新格式的后果是
+ * 「已导入 12 段字幕文字」扣在一份 `.txt` 歌词上，用户会以为程序把它
+ * 当字幕解析了——而歌词里确实一个字的时间轴都没有。
+ */
+export function importNoun(ext: string): string {
+  return SUBTITLE_EXTENSIONS.includes(ext.toLowerCase()) ? '字幕' : '文本'
+}
+
+/**
+ * 可直接解析的字幕扩展名、可直接读入的纯文本扩展名。
+ *
+ * 与 `backend/src/extraction/subtitle.ts`、`plaintext.ts` 各重复了一份。
+ * 接受这份重复，是因为它们只用来决定**按钮上的字**：漏掉一个新格式的后果是
  * 「按钮写的是『提取文字』，点下去照样能导入」——难看，但不影响正确性。
- * 反过来，若要前端去问后端「这个扩展名算不算字幕」，就得多一个接口，
+ * 反过来，若要前端去问后端「这个扩展名算不算可直接导入」，就得多一个接口，
  * 而它回答的还是同一个问题。
  */
 const SUBTITLE_EXTENSIONS = ['.srt', '.vtt', '.ass', '.ssa']
+const PLAIN_TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.json', '.csv']
 
 /** 时间轴显示：超过一小时才补上小时位，免得半小时的视频全是 `00:` 开头。 */
 export function formatTimestamp(ms: number | null): string {

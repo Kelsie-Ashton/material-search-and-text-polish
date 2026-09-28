@@ -6,9 +6,17 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import type { Db } from '../db/index.js'
 import { createAsset, createDirectory, ftsRowIds } from '../test/factory.js'
+import { search } from '../search/index.js'
 import { updateSettings } from '../settings/preferences.js'
 import { createTestDb } from '../test/temp-db.js'
-import { importSubtitleText, listSegments } from './importer.js'
+import { SUPPORTED_EXTENSIONS } from '../config.js'
+import {
+  DIRECT_IMPORT_EXTENSIONS,
+  PARSER_VERSION,
+  canImportDirectly,
+  importTextFile,
+  listSegments,
+} from './importer.js'
 
 /**
  * 字幕导入的测试。
@@ -66,7 +74,7 @@ describe('字幕导入', () => {
   it('把字幕解析成带时间轴的段落落库', () => {
     const asset = subtitleAsset('探店.srt', '.srt')
 
-    const result = importSubtitleText(db, asset.id)
+    const result = importTextFile(db, asset.id)
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -84,7 +92,7 @@ describe('字幕导入', () => {
 
   it('导入后素材状态变为已提取', () => {
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const row = db
       .prepare('SELECT extract_status, extracted_at, extract_error FROM assets WHERE id = ?')
@@ -103,28 +111,69 @@ describe('字幕导入', () => {
     // 段落 → FTS 的同步由 asset_text_segments 上的触发器完成。
     // 这条断言的意义是：**导入完就能搜到**，不需要任何后续批量建索引动作。
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const rows = listSegments(db, asset.id)
     const hitIds = ftsRowIds(db, '火锅店')
     expect(hitIds).toContain(rows.items[0]?.id)
   })
 
+  it('字幕里跨折行的词，导入后仍然搜得到', () => {
+    // 找回损失的关键一条。番剧 .ass 里 \N 无处不在，一句台词常被排成两行；
+    // 折行处一旦补上空格，「今天我们来探\N店吃火锅」就存成「…来探 店吃火锅」，
+    // 素材导得进去、状态也是「已提取」，**就是搜不到**，而且不报任何错——
+    // 用户只会以为「这话里没有那个词」。
+    //
+    // 所以必须端到端走 search()：只断言落库文本，测不出「搜不到」。
+    const styledAss = [
+      '[Script Info]',
+      'ScriptType: v4.00+',
+      '',
+      '[V4+ Styles]',
+      'Format: Name, Fontname, Fontsize',
+      'Style: Default,微软雅黑,48',
+      '',
+      '[Events]',
+      'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text',
+      'Dialogue: 0,0:00:01.00,0:00:04.00,Default,,0,0,0,,今天我们来探\\N店吃火锅',
+      'Dialogue: 0,0:00:05.00,0:00:08.00,Default,,0,0,0,,这家火{\\k20}锅店很有名',
+    ].join('\n')
+
+    const file = writeFile('跨折行.ass', styledAss)
+    const asset = createAsset(db, directoryId, {
+      fileName: '跨折行.ass',
+      path: file,
+      ext: '.ass',
+      kind: 'text',
+    })
+    importTextFile(db, asset.id)
+
+    // 跨 \N 的词（两个字，走 LIKE 兜底路径）
+    const crossBreak = search(db, '探店')
+    expect(crossBreak.ok).toBe(true)
+    if (crossBreak.ok) expect(crossBreak.value.items[0]?.segmentHitCount).toBe(1)
+
+    // 被行内 {\k20} 标签切断的词（三个字，走 FTS 路径）
+    const crossTag = search(db, '火锅店')
+    expect(crossTag.ok).toBe(true)
+    if (crossTag.ok) expect(crossTag.value.items[0]?.segmentHitCount).toBe(1)
+  })
+
   it('重复导入是替换而不是追加', () => {
     // 追加的话，改过字幕再导一次会得到新旧两份文本，
     // 检索时同一句话出现两次，用户会以为索引坏了。
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
+    importTextFile(db, asset.id)
 
     expect(listSegments(db, asset.id).total).toBe(2)
   })
 
   it('文件没变时命中缓存，不重新解析', () => {
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
-    const second = importSubtitleText(db, asset.id)
+    const second = importTextFile(db, asset.id)
 
     expect(second.ok && second.value.reused).toBe(true)
     expect(second.ok && second.value.segmentCount).toBe(2)
@@ -132,12 +181,12 @@ describe('字幕导入', () => {
 
   it('文件变了就不再命中缓存', () => {
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     // 模拟重新扫描后指纹更新
     db.prepare('UPDATE assets SET fingerprint = ? WHERE id = ?').run('fp-changed', asset.id)
 
-    const second = importSubtitleText(db, asset.id)
+    const second = importTextFile(db, asset.id)
     expect(second.ok && second.value.reused).toBe(false)
   })
 
@@ -150,7 +199,7 @@ describe('字幕导入', () => {
       kind: 'text',
     })
 
-    const result = importSubtitleText(db, asset.id)
+    const result = importTextFile(db, asset.id)
 
     expect(result.ok && result.value.empty).toBe(true)
     expect(result.ok && result.value.status).toBe('done')
@@ -166,7 +215,7 @@ describe('字幕导入', () => {
   it('不是字幕类型时明确拒绝，并说明哪些格式可用', () => {
     const asset = createAsset(db, directoryId, { fileName: '视频.mp4', ext: '.mp4' })
 
-    const result = importSubtitleText(db, asset.id)
+    const result = importTextFile(db, asset.id)
 
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -175,7 +224,7 @@ describe('字幕导入', () => {
   })
 
   it('素材不存在时返回 ASSET_NOT_FOUND', () => {
-    const result = importSubtitleText(db, 9999)
+    const result = importTextFile(db, 9999)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.code).toBe('ASSET_NOT_FOUND')
   })
@@ -189,7 +238,7 @@ describe('字幕导入', () => {
       kind: 'text',
     })
 
-    const result = importSubtitleText(db, asset.id)
+    const result = importTextFile(db, asset.id)
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.code).toBe('EXTRACTION_FAILED')
@@ -210,7 +259,7 @@ describe('字幕导入', () => {
       ext: '.srt',
       kind: 'text',
     })
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const run = db
       .prepare('SELECT status, error_code FROM extraction_runs WHERE asset_id = ?')
@@ -223,7 +272,7 @@ describe('字幕导入', () => {
   it('过大的文件被拒绝而不是读进内存', () => {
     const asset = subtitleAsset('超大.srt', '.srt', { sizeBytes: 32 * 1024 * 1024 })
 
-    const result = importSubtitleText(db, asset.id)
+    const result = importTextFile(db, asset.id)
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error.code).toBe('EXTRACTION_FAILED')
@@ -245,7 +294,7 @@ describe('字幕导入', () => {
       kind: 'text',
     })
 
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     expect(listSegments(db, asset.id).items[0]?.text).toBe('今天')
   })
@@ -268,7 +317,7 @@ describe('字幕导入', () => {
       kind: 'text',
     })
 
-    const result = importSubtitleText(db, asset.id)
+    const result = importTextFile(db, asset.id)
 
     expect(result.ok && result.value.segmentCount).toBe(1)
     expect(listSegments(db, asset.id).items[0]?.text).toBe('おかえりなさい')
@@ -276,7 +325,7 @@ describe('字幕导入', () => {
 
   it('删除素材会一并带走段落与全文索引', () => {
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
     const segmentId = listSegments(db, asset.id).items[0]?.id ?? 0
 
     db.prepare('DELETE FROM assets WHERE id = ?').run(asset.id)
@@ -285,6 +334,86 @@ describe('字幕导入', () => {
     // 级联删除必须触发 FTS 的 AFTER DELETE 触发器，否则会留下
     // 指向不存在段落的幽灵条目——用户会看到点不开的搜索结果。
     expect(ftsRowIds(db, '火锅店')).not.toContain(segmentId)
+  })
+})
+
+describe('纯文本导入', () => {
+  function plainAsset(name: string, ext: string, content: string | Buffer) {
+    const file = writeFile(name, content)
+    return createAsset(db, directoryId, { fileName: name, path: file, ext, kind: 'text' })
+  }
+
+  it('扫描器认作文本的扩展名，全都能直接导入', () => {
+    // 这条钉的是一个**不变量**：config.ts 里 text 那一档，与 importer 里
+    // 可直接读取的扩展名，必须完全一致。
+    //
+    // 不一致会怎样：往 config 里加一个 `.log`，扫描器会把它收进素材库、
+    // 界面上照常列出来，用户点「提取文字」却得到一句「暂不提供」——
+    // 他完全无从判断是程序还没做，还是自己的文件有问题。
+    for (const ext of SUPPORTED_EXTENSIONS.text) {
+      expect(canImportDirectly(ext), `${ext} 应当能直接导入`).toBe(true)
+      expect(DIRECT_IMPORT_EXTENSIONS).toContain(ext)
+    }
+  })
+
+  it('.txt 按行入库，并且导入后立刻搜得到', () => {
+    // 端到端走 search()：只断言落库文本，测不出「搜不到」。
+    const asset = plainAsset('歌词.txt', '.txt', '今天我们来探店这家火锅店\n招牌菜是毛肚和鸭肠\n')
+
+    const result = importTextFile(db, asset.id)
+
+    expect(result.ok && result.value.segmentCount).toBe(2)
+    expect(result.ok && result.value.empty).toBe(false)
+
+    const segments = listSegments(db, asset.id)
+    expect(segments.items[0]?.text).toBe('今天我们来探店这家火锅店')
+    expect(segments.items[0]?.startMs).toBeNull()
+
+    const hit = search(db, '火锅店')
+    expect(hit.ok && hit.value.items[0]?.segmentHitCount).toBe(1)
+  })
+
+  it('没有时间轴的段落，时间码不会显示成 00:00', () => {
+    // 断言的是「null 一路传到底」：中间任何一环把 null 兜成 0，
+    // 界面上就会冒出一个 00:00，而文件里根本没有时间这回事。
+    const asset = plainAsset('笔记.txt', '.txt', '随手记一句\n')
+    importTextFile(db, asset.id)
+
+    expect(listSegments(db, asset.id).items[0]?.startMs).toBeNull()
+  })
+
+  it('GBK 编码的 .txt 不会变成乱码', () => {
+    // 与字幕同一个坑，而且纯文本更常见：中文老文档、记事本另存的 txt
+    // 默认就是 GBK。按 UTF-8 硬读会整篇乱码，而且**不报错**——
+    // 用户只会看到一份读不懂的文本，然后以为程序坏了。
+    const buffer = Buffer.concat([Buffer.from([0xbd, 0xf1, 0xcc, 0xec]), Buffer.from('\n')])
+    const asset = plainAsset('gbk.txt', '.txt', buffer)
+
+    importTextFile(db, asset.id)
+
+    expect(listSegments(db, asset.id).items[0]?.text).toBe('今天')
+  })
+
+  it('读不出来的 .txt 记成失败并留下原因，不抛异常', () => {
+    // 「友好跳过」的具体含义：不崩、也不静默。素材状态变成 failed，
+    // 原因是人话，用户能据此判断该怎么办。
+    const asset = createAsset(db, directoryId, {
+      fileName: '不在了.txt',
+      path: path.join(workDir, '不在了.txt'),
+      ext: '.txt',
+      kind: 'text',
+    })
+
+    const result = importTextFile(db, asset.id)
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.error.code).toBe('EXTRACTION_FAILED')
+
+    const row = db
+      .prepare('SELECT extract_status, extract_error FROM assets WHERE id = ?')
+      .get(asset.id) as { extract_status: string; extract_error: string | null }
+    expect(row.extract_status).toBe('failed')
+    expect(row.extract_error).toContain('无法读取')
   })
 })
 
@@ -316,7 +445,7 @@ describe('按偏好转换字形后再落库', () => {
     // 而且**不报错**，用户只会以为「这个素材没提到过」。
     const asset = traditionalSubtitle()
 
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const items = listSegments(db, asset.id).items
     expect(items[0]?.text).toBe('今天我们来探店这家火锅店')
@@ -328,7 +457,7 @@ describe('按偏好转换字形后再落库', () => {
     // 落库的文本与 FTS 里的内容由触发器同步，两处必须都是转换后的字——
     // 若只在读取时转换，库和索引仍是繁体，搜索照样搜不到。
     const asset = traditionalSubtitle()
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const segmentId = listSegments(db, asset.id).items[0]?.id ?? 0
     expect(ftsRowIds(db, '火锅店')).toContain(segmentId)
@@ -342,7 +471,7 @@ describe('按偏好转换字形后再落库', () => {
     updateSettings(db, { textScript: 'traditional' })
     const asset = subtitleAsset('简体.srt', '.srt')
 
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const items = listSegments(db, asset.id).items
     expect(items[0]?.text).toBe('今天我們來探店這家火鍋店')
@@ -354,11 +483,11 @@ describe('按偏好转换字形后再落库', () => {
     // 引擎版本里若不带上字形，用户把偏好从简体改成繁体再点提取，
     // 只会命中旧缓存拿到简体——**设置改了却毫无反应**，还不报错。
     const asset = traditionalSubtitle()
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
     expect(listSegments(db, asset.id).items[0]?.text).toBe('今天我们来探店这家火锅店')
 
     updateSettings(db, { textScript: 'traditional' })
-    const second = importSubtitleText(db, asset.id)
+    const second = importTextFile(db, asset.id)
 
     expect(second.ok && second.value.reused).toBe(false)
     expect(listSegments(db, asset.id).items[0]?.text).toBe('今天我們來探店這家火鍋店')
@@ -368,9 +497,9 @@ describe('按偏好转换字形后再落库', () => {
     // 上一条容易改过头——把所有情况都判成缓存失效，白跑一遍解析。
     // 这里钉住：只有偏好真的变了才失效。
     const asset = traditionalSubtitle()
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
-    const second = importSubtitleText(db, asset.id)
+    const second = importTextFile(db, asset.id)
     expect(second.ok && second.value.reused).toBe(true)
   })
 
@@ -378,26 +507,29 @@ describe('按偏好转换字形后再落库', () => {
     // 缓存键是这个字段，所以它必须真的带上字形；
     // 只断言「重新解析了」的话，万一缓存判定被别的原因改坏，
     // 这条线索就丢了。
+    //
+    // 版本号本身不写死在这里：解析逻辑一改就要升它，写死会让每次升版
+    // 都撞到这条与版本无关的断言上。要钉的是「版本 + 字形」这个结构。
     const asset = traditionalSubtitle()
     updateSettings(db, { textScript: 'traditional' })
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const run = db
       .prepare('SELECT engine_versions FROM extraction_runs WHERE asset_id = ?')
       .get(asset.id) as { engine_versions: string } | undefined
 
-    expect(run?.engine_versions).toBe('subtitle-v1+traditional')
+    expect(run?.engine_versions).toBe(`${PARSER_VERSION}+traditional`)
   })
 
   it('转换是幂等的，缩略字幕重复导入不会逐次漂移', () => {
     // 简→简、繁→繁都必须不变。否则每提取一次文字就变一点，
     // 用户会看到文本在自己的眼前慢慢变样。
     const asset = subtitleAsset('简体.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
     const first = listSegments(db, asset.id).items[0]?.text
 
     db.prepare('UPDATE assets SET fingerprint = ? WHERE id = ?').run('fp-changed', asset.id)
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     expect(listSegments(db, asset.id).items[0]?.text).toBe(first)
   })
@@ -415,7 +547,7 @@ describe('按偏好转换字形后再落库', () => {
       kind: 'text',
     })
 
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     expect(listSegments(db, asset.id).items[0]?.text).toBe('Welcome to my channel')
   })
@@ -424,7 +556,7 @@ describe('按偏好转换字形后再落库', () => {
 describe('段落读取', () => {
   it('分页参数生效', () => {
     const asset = subtitleAsset('探店.srt', '.srt')
-    importSubtitleText(db, asset.id)
+    importTextFile(db, asset.id)
 
     const page = listSegments(db, asset.id, { limit: 1, offset: 1 })
     expect(page.total).toBe(2)

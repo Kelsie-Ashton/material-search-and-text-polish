@@ -440,25 +440,67 @@ describe('素材库页面', () => {
       expect(await screen.findByText('鸭肠也要点')).toBeTruthy()
     })
 
-    it('提取不了的类型：把后端给的原因原样显示，不换成笼统的「操作失败」', async () => {
-      useAsset({ fileName: '笔记.txt', ext: '.txt', kind: 'text' })
+    it('纯文本：按钮可用，点下去真的把文字导进来', async () => {
+      useAsset({ fileName: '歌词.txt', ext: '.txt', kind: 'text' })
       extractionResponse = {
-        status: 501,
-        error: {
-          code: 'NOT_IMPLEMENTED',
-          message: '「.txt」本身已经是文字，不需要识别引擎，但把它读进索引要先判定编码。',
+        ok: true,
+        value: { mode: 'imported', assetId: 42, status: 'done', segmentCount: 2, reused: false, empty: false },
+      }
+      segmentsResponse = {
+        ok: true,
+        value: {
+          items: [
+            { id: 1, source: 'file', ordinal: 0, text: '第一句歌词', startMs: null, endMs: null },
+            { id: 2, source: 'file', ordinal: 1, text: '第二句歌词', startMs: null, endMs: null },
+          ],
+          total: 2,
         },
       }
 
       const user = userEvent.setup()
       render(<LibraryPage />)
-      await user.click(await screen.findByText('笔记.txt'))
+      await user.click(await screen.findByText('歌词.txt'))
 
-      // 纯文本的按钮是禁用的，这里直接点它验证「真点下去也不会说错话」——
-      // 界面上的禁用只是提示，真正拦住的必须是接口。
-      await user.click(await screen.findByRole('button', { name: '提取文字' }))
+      // 按钮上的字要说准：纯文本没有时间轴，说成「导入字幕文字」会让
+      // 用户以为程序把歌词当字幕解析了。
+      await user.click(await screen.findByRole('button', { name: '导入文本文字' }))
 
-      expect(await screen.findByText(/先判定编码/)).toBeTruthy()
+      expect(await screen.findByText(/已导入 2 段文本文字/)).toBeTruthy()
+      // 没有时间轴的段落不该显示 00:00
+      expect(await screen.findByText('第一句歌词')).toBeTruthy()
+      expect(screen.queryByText('00:00')).toBeNull()
+    })
+
+    it('还不能直接读的文本格式：按钮禁用并说明原因', async () => {
+      // config.ts 里 text 那一档现在都能导入了，这条走的是兜底分支——
+      // 留着它是为了「加了扩展名却忘了接上」那天，界面上仍有一句说得通的话，
+      // 而不是让用户对着一个点不动的按钮猜。
+      useAsset({ fileName: '日志.log', ext: '.log', kind: 'text' })
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('日志.log'))
+
+      const button = await screen.findByRole('button', { name: '提取文字' })
+      expect((button as HTMLButtonElement).disabled).toBe(true)
+      expect(screen.getByText(/还不能直接读进索引/)).toBeTruthy()
+    })
+
+    it('导入失败：把后端给的原因原样显示，不换成笼统的「操作失败」', async () => {
+      // 这些原因（文件被删了、编码有问题、格式不认）用户都能自己处理，
+      // 换成「操作失败」四个字，等于把唯一有用的线索扔了。
+      useAsset({ fileName: '歌词.txt', ext: '.txt', kind: 'text' })
+      extractionResponse = {
+        status: 500,
+        error: { code: 'EXTRACTION_FAILED', message: '无法读取文本文件：ENOENT: no such file or directory' },
+      }
+
+      const user = userEvent.setup()
+      render(<LibraryPage />)
+      await user.click(await screen.findByText('歌词.txt'))
+      await user.click(await screen.findByRole('button', { name: '导入文本文字' }))
+
+      expect(await screen.findByText(/无法读取文本文件/)).toBeTruthy()
     })
 
     it('音视频排队后，列表那一行会显示进度说明', async () => {

@@ -6,6 +6,7 @@ import {
   SOURCE_LABELS,
   extractionPlan,
   formatTimestamp,
+  importNoun,
   listSegments,
   startExtraction,
 } from '../api/extraction'
@@ -162,17 +163,22 @@ export default function AssetDetailPanel({
       const result = await startExtraction(assetId)
 
       if (result.mode === 'imported') {
-        // 同步完成的那条路（字幕）：结果已经在了，直接读回来
+        // 同步完成的那条路（字幕与纯文本）：结果已经在了，直接读回来
         await reload()
         await reloadSegments()
         onExtractionChanged?.()
 
+        // 读进来的是字幕还是纯文本，提示语要说准——同一句
+        // 「已导入 N 段字幕文字」扣在一份 .txt 歌词上会让人以为
+        // 程序把它当字幕解析了，而歌词里一个字的时间轴都没有。
+        const noun = detail ? importNoun(detail.ext) : '文本'
+
         if (result.empty) {
           // 「已提取、无内容」不是失败——前者不需要重试，后者需要。
-          // 说清楚是文件里本来就没有字幕对白，而不是程序没干活。
+          // 说清楚是文件里本来就没有文字，而不是程序没干活。
           setNotice({
             kind: 'info',
-            text: '已读取这个文件，但没有解析出任何字幕内容。可能是空文件，或格式不被识别。',
+            text: '已读取这个文件，但没有读出任何文字内容。可能是空文件，或格式不被识别。',
           })
         } else if (result.reused) {
           setNotice({
@@ -180,7 +186,7 @@ export default function AssetDetailPanel({
             text: `这条素材的提取结果已经是最新的（${result.segmentCount} 段），直接复用了上次的结果。`,
           })
         } else {
-          setNotice({ kind: 'ok', text: `已导入 ${result.segmentCount} 段字幕文字。` })
+          setNotice({ kind: 'ok', text: `已导入 ${result.segmentCount} 段${noun}文字。` })
         }
         return
       }
