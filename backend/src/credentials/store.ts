@@ -228,3 +228,34 @@ export function createCredentialsStore(file: string = credentialsFile): Credenti
  * README 里会如实说明，不假装这是强隔离。
  */
 export const credentialsStore = createCredentialsStore()
+
+/**
+ * 给测试套件加一道闸：**真实单例在测试里一被用到就抛错。**
+ *
+ * 为什么要有它。测试里写 `createApp({ db })` 而忘了注入 `credentialsStore` 时，
+ * 落到的是上面那个指向用户真实 `data/credentials.json` 的单例。于是测试会
+ * 读着真实密钥、向真实地址发出**真实且要花钱**的请求，而结果依赖本机
+ * 恰好配着什么——在开发机上「通过」，在干净环境必然失败。
+ *
+ * 加「畸形请求体」那组用例时就这么踩了一次：`POST /api/settings/credentials/test`
+ * 返回了 200，因为本机存着可用凭证，请求真的发出去并且成功了。
+ *
+ * **闸装在这里而不是 createApp 里，是为了精确。** 装在 createApp 里的话，
+ * 每个 `createApp({ db })` 都得注入一个它根本用不到的存储，纯属仪式；
+ * 而真正危险的动作只有一个——**碰真实凭证**。所以拦的是这个动作本身。
+ *
+ * 用 `process.env['VITEST']` 而不是 NODE_ENV：vitest 一定会设前者，
+ * 而后者常被别的脚本改来改去。
+ */
+if (process.env['VITEST'] !== undefined) {
+  for (const method of ['readRaw', 'readStatus', 'save', 'clear', 'getAvailability'] as const) {
+    Object.defineProperty(credentialsStore, method, {
+      value: () => {
+        throw new Error(
+          `测试不能碰真实的凭证存储（调用了 credentialsStore.${method}）。` +
+            `请注入一个临时文件：createApp({ credentialsStore: createCredentialsStore(tmpFile) })。`,
+        )
+      },
+    })
+  }
+}

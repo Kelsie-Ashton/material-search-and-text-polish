@@ -33,6 +33,32 @@ export interface AppOptions {
 }
 
 /**
+ * 认出「客户端自己发错了」这类错误（畸形 JSON、请求体过大），返回该用的状态码。
+ *
+ * 只认 body-parser 挂上来的 `type` 与 4xx 的 `status` 两个结构化字段，
+ * **不去匹配错误信息文本**——那些文案会随上游版本变，而字段是稳定的契约。
+ *
+ * 返回 null 表示「这不是客户端的问题」，交给 500 那条路。
+ */
+function readClientErrorStatus(err: unknown): number | null {
+  if (typeof err !== 'object' || err === null) return null
+  const candidate = err as { type?: unknown; status?: unknown; statusCode?: unknown }
+
+  // body-parser 的错误 type 都长这样：entity.parse.failed / entity.too.large
+  if (typeof candidate.type !== 'string' || !candidate.type.startsWith('entity.')) return null
+
+  const status = candidate.status ?? candidate.statusCode
+  if (typeof status !== 'number' || status < 400 || status >= 500) return null
+  return status
+}
+
+function messageForClientError(status: number): string {
+  // 413 是 express.json({ limit }) 拦下来的。用户看不到这个数字，
+  // 所以话要说全：是**这次发的东西太大**，不是这个接口不能用。
+  return status === 413 ? '请求体过大' : '请求体不是合法的 JSON'
+}
+
+/**
  * 组装 Express 应用。
  * 与监听分离，便于测试中直接使用 app 而不占用端口。
  */
@@ -41,6 +67,9 @@ export function createApp(options: AppOptions = {}) {
 
   // 凭证存储解析一次、多处使用（设置页与润色都要）。同一份实例很要紧：
   // 润色读的就是设置页刚写进去的那把 Key，两个实例会各自缓存文件内容。
+  //
+  // 测试应当注入临时文件（`createApp({ credentialsStore })`）。忘了注入的话，
+  // 落到的这个真实单例会在**被用到时**自己拦下来——见 store.ts 里的说明。
   const store = options.credentialsStore ?? credentialsStore
 
   app.use(express.json({ limit: '1mb' }))
@@ -118,6 +147,25 @@ export function createApp(options: AppOptions = {}) {
   // 兜底错误处理：只处理「不该发生」的编程错误。
   // 可预期的业务失败一律通过 Result 返回，不走这里。
   const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+    // **请求体畸形不是「我们的代码错了」，是客户端发错了。**
+    //
+    // 这一条以前会被报成 500 INTERNAL，并在日志里打一行 `[unhandled error]`。
+    // 后果有两层：客户端拿去一个「服务器内部错误」不知道该怎么办；
+    // 而日志里那些真正的 bug 会被这类噪声淹掉——一个总在报警的日志等于没有日志。
+    //
+    // body-parser 会给自己的错误带上 `type`（如 entity.parse.failed）与
+    // 4xx 的 `status`，认这两个字段即可，不必去匹配错误信息文本。
+    const status = readClientErrorStatus(err)
+    if (status !== null) {
+      // 用 warn 而不是 error：这不是需要有人去修的东西
+      console.warn('[bad request]', err instanceof Error ? err.message : err)
+      res.status(status).json({
+        ok: false,
+        error: { code: 'VALIDATION_FAILED', message: messageForClientError(status) },
+      })
+      return
+    }
+
     console.error('[unhandled error]', err)
     res.status(500).json({
       ok: false,

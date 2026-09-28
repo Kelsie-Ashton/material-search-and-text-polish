@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { createCredentialsStore } from './store.js'
+import { createCredentialsStore, credentialsStore } from './store.js'
 
 const REAL_KEY = 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
 
@@ -221,5 +221,26 @@ describe('脱敏函数', () => {
 
     const status = store.readStatus()
     if (status.ok) expect(status.value.maskedKey).toBe('****')
+  })
+})
+
+/**
+ * 测试套件的护栏本身。
+ *
+ * 这条测的是「护栏还在」——一个静默失效的护栏比没有护栏更糟：
+ * 它会让人以为自己被保护着。
+ */
+describe('真实单例在测试里的护栏', () => {
+  it('一被用到就抛错，而不是去读用户真实的 data/credentials.json', () => {
+    // 这条护栏是踩出来的：一个忘了注入 credentialsStore 的测试
+    // 读着真实密钥、向真实地址发出了**真实且要花钱**的请求，
+    // 而且断言在本机「通过」、在干净环境必然失败。
+    expect(() => credentialsStore.readRaw()).toThrow(/不能碰真实的凭证存储/)
+    expect(() => credentialsStore.getAvailability()).toThrow(/不能碰真实的凭证存储/)
+  })
+
+  it('报错信息里给出正确的写法', () => {
+    // 只报「不许用」而不说该怎么办，下一个人只会把护栏删掉
+    expect(() => credentialsStore.save({ apiKey: 'x' })).toThrow(/createCredentialsStore/)
   })
 })
