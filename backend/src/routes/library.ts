@@ -12,6 +12,7 @@ import {
 } from '../library/directories.js'
 import { sendResult } from '../shared/http.js'
 import { err } from '../shared/result.js'
+import { archiveKeywords, suggestKeywords } from '../tags/archive.js'
 import {
   linkTag,
   listAssetTags,
@@ -200,6 +201,59 @@ export function createLibraryRouter(db: Db, queue: JobQueue): Router {
       return
     }
     res.json({ ok: true, value: { items: listAssetTags(db, id) } })
+  })
+
+  /**
+   * 候选关键词（任务 6.10）。从这条素材已提取的正文里挑，**不联网**。
+   *
+   * 已经挂过的标签会被剔掉——候选里出现一个已经挂着的标签，用户勾了、
+   * 点了归档、什么也没发生，看起来就像功能坏了。
+   */
+  router.get('/assets/:id/tag-candidates', (req, res) => {
+    const id = parseId(req.params.id)
+    if (id === null) {
+      sendResult(res, err('VALIDATION_FAILED', '素材 id 不合法'), 400)
+      return
+    }
+
+    const result = suggestKeywords(db, id)
+    if (!result.ok) {
+      sendResult(res, result)
+      return
+    }
+    res.json({ ok: true, value: { items: result.value } })
+  })
+
+  /**
+   * 把一批关键词归档成标签。
+   *
+   * 与上面那条「挂一个标签」的接口分开，不只是为了少发几次请求：
+   * 归档是**一次操作**，用户点一下、得到一个总结（挂上了几个、几个已经有
+   * 了、几个名字不合法）。逐条调用的话，界面只能自己拼这个总结，
+   * 而拼错了没人会发现。
+   */
+  router.post('/assets/:id/tags/archive', (req, res) => {
+    const id = parseId(req.params.id)
+    if (id === null) {
+      sendResult(res, err('VALIDATION_FAILED', '素材 id 不合法'), 400)
+      return
+    }
+
+    const body = req.body as { keywords?: unknown } | undefined
+    if (!Array.isArray(body?.keywords)) {
+      sendResult(res, err('VALIDATION_FAILED', '请提供要归档的关键词（keywords 数组）'), 400)
+      return
+    }
+    // 只收字符串。混进数字或对象就让 normalizeTagName 去处理的话，
+    // 它会一路把非字符串当成「名字不合法」，用户看到的是「有 1 个没归档」
+    // 而不是「你发的请求有问题」——后者才是实情。
+    const keywords = body.keywords.filter((item): item is string => typeof item === 'string')
+    if (keywords.length !== body.keywords.length) {
+      sendResult(res, err('VALIDATION_FAILED', '关键词必须是字符串'), 400)
+      return
+    }
+
+    sendResult(res, archiveKeywords(db, id, keywords))
   })
 
   router.post('/assets/:id/tags', (req, res) => {

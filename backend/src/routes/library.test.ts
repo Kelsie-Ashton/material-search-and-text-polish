@@ -381,3 +381,145 @@ describe('素材库路由', () => {
     })
   })
 })
+
+/**
+ * 归档为标签的路由（任务 6.10）。
+ *
+ * 路由层自己要说清的是三件事：参数不合法时是哪一种不合法、素材不存在时
+ * 与「没有候选」区分得开、以及归档的结果形状被固定下来。
+ */
+describe('归档为标签的路由', () => {
+  let db: Db
+  let app: ReturnType<typeof createApp>
+  let directoryId: number
+
+  beforeEach(() => {
+    db = createTestDb()
+    app = createApp({ db, jobQueue: createJobQueue(db) })
+    directoryId = Number(
+      db
+        .prepare("INSERT INTO directories (path, path_key, label, created_at) VALUES ('D:/m','d:/m',NULL,?)")
+        .run(Date.now()).lastInsertRowid,
+    )
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  /** 造一条已提取过文字的素材。正文要够长且词有变化，否则挑不出候选。 */
+  function assetWithText(fileName = '探店.mp4'): number {
+    const assetId = Number(
+      db
+        .prepare(
+          `INSERT INTO assets (directory_id, path, path_key, file_name, ext, kind,
+                               size_bytes, mtime_ms, fingerprint, created_at, updated_at)
+           VALUES (?, ?, ?, ?, '.mp4', 'video', 1, 1, '1:1', ?, ?)`,
+        )
+        .run(directoryId, `D:/m/${fileName}`, `d:/m/${fileName}`, fileName, Date.now(), Date.now())
+        .lastInsertRowid,
+    )
+
+    const left = '的了是在和有人这那就都也很'
+    const right = '啊吧呢吗呀哦嗯哈嘛哇'
+    const insert = db.prepare(
+      `INSERT INTO asset_text_segments (asset_id, source, ordinal, text, created_at)
+       VALUES (?, 'audio', ?, ?, ?)`,
+    )
+    Array.from({ length: 10 }, (_, i) => `${left[i % left.length]}火锅店${right[i % right.length]}`)
+      .forEach((text, index) => insert.run(assetId, index, text, Date.now()))
+
+    return assetId
+  }
+
+  it('GET 返回候选关键词', async () => {
+    const assetId = assetWithText()
+
+    const res = await request(app).get(`/api/library/assets/${assetId}/tag-candidates`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.value.items.map((c: { word: string }) => c.word)).toContain('火锅店')
+  })
+
+  it('还没提取过文字时返回空列表，而不是错误', async () => {
+    const assetId = Number(
+      db
+        .prepare(
+          `INSERT INTO assets (directory_id, path, path_key, file_name, ext, kind,
+                               size_bytes, mtime_ms, fingerprint, created_at, updated_at)
+           VALUES (?, 'D:/m/空.mp4', 'd:/m/空.mp4', '空.mp4', '.mp4', 'video', 1, 1, '1:1', ?, ?)`,
+        )
+        .run(directoryId, Date.now(), Date.now()).lastInsertRowid,
+    )
+
+    const res = await request(app).get(`/api/library/assets/${assetId}/tag-candidates`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.value.items).toEqual([])
+  })
+
+  it('素材不存在时 404，与「没有候选」区分得开', async () => {
+    // 拼错的 id 拿到一个空列表，会与「这条素材确实没候选」混为一谈
+    const res = await request(app).get('/api/library/assets/9999/tag-candidates')
+
+    expect(res.status).toBe(404)
+    expect(res.body.error.code).toBe('ASSET_NOT_FOUND')
+  })
+
+  it('POST 归档多个关键词，返回三分桶', async () => {
+    const assetId = assetWithText()
+
+    const res = await request(app)
+      .post(`/api/library/assets/${assetId}/tags/archive`)
+      .send({ keywords: ['火锅店', '探店'] })
+
+    expect(res.status).toBe(200)
+    expect(res.body.value.linked.map((t: { name: string }) => t.name).sort()).toEqual([
+      '探店',
+      '火锅店',
+    ])
+    expect(res.body.value.alreadyLinked).toEqual([])
+  })
+
+  it('归档后的关键词能被检索命中——这是这条功能的验收点', async () => {
+    const assetId = assetWithText('与关键词无关的名字.mp4')
+    await request(app).post(`/api/library/assets/${assetId}/tags/archive`).send({ keywords: ['火锅店'] })
+
+    const found = await request(app).get('/api/search').query({ q: '火锅店' })
+    expect(found.body.value.items.map((i: { asset: { fileName: string } }) => i.asset.fileName)).toContain(
+      '与关键词无关的名字.mp4',
+    )
+  })
+
+  it('keywords 不是数组时 400', async () => {
+    const assetId = assetWithText()
+
+    const res = await request(app)
+      .post(`/api/library/assets/${assetId}/tags/archive`)
+      .send({ keywords: '火锅店' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.code).toBe('VALIDATION_FAILED')
+    expect(res.body.error.message).toContain('数组')
+  })
+
+  it('数组里混进非字符串时 400，而不是当成「名字不合法」悄悄跳过', async () => {
+    // 两者给用户的信息完全不同：一个是「你发的请求有问题」，
+    // 一个是「有一个名字不合规」
+    const assetId = assetWithText()
+
+    const res = await request(app)
+      .post(`/api/library/assets/${assetId}/tags/archive`)
+      .send({ keywords: ['火锅店', 42] })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error.message).toContain('字符串')
+  })
+
+  it('id 不合法时 400', async () => {
+    for (const bad of ['abc', '0', '-1']) {
+      const res = await request(app).post(`/api/library/assets/${bad}/tags/archive`).send({ keywords: [] })
+      expect(res.status, `id=${bad}`).toBe(400)
+    }
+  })
+})
