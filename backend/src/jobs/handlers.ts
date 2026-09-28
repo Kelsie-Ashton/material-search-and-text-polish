@@ -1,13 +1,13 @@
 import type { Db } from '../db/index.js'
 import { syncAssetExtractStatus } from '../extraction/asset-status.js'
-import { importSubtitleText } from '../extraction/importer.js'
+import { canImportDirectly, importTextFile } from '../extraction/importer.js'
+import type { ModelDownloadProgress } from '../extraction/asr.js'
 import {
   extractMediaText,
   isMediaKind,
   type ExtractPhase,
   type MediaDeps,
 } from '../extraction/media.js'
-import { isSubtitleExtension } from '../extraction/subtitle.js'
 import { findAsset } from '../library/assets.js'
 import { findDirectory, markDirectoryScanned } from '../library/directories.js'
 import { scanDirectory, type ScanProgress } from '../library/scanner.js'
@@ -63,6 +63,38 @@ const PHASE_MESSAGES: Record<ExtractPhase, string> = {
   persisting: '正在写入结果…',
 }
 
+/** 下载进度的总数固定为 100，与 percent 同一把尺子——界面按 current/total 画进度条。 */
+const PROGRESS_PERCENT_SCALE = 100
+
+/**
+ * 把模型下载进度翻成一句话（任务 5.11）。
+ *
+ * **为什么这句话必须存在。** 首次转写要先下 241 MB，而在此之前，界面上
+ * 只有一句「正在转写语音」挂着一小时不动。用户无从判断它是卡住了、
+ * 还是在干活，于是多半会在中途关掉窗口——而那次下载的成果一点都不会留下。
+ * 所以这句话要同时说清三件事：**在下载**、**还要多久**（进度条负责）、
+ * **只需这一次**。最后一条最重要：不说的话，用户会以为每次提取都要重下 241 MB，
+ * 从而放弃使用。
+ */
+function describeModelProgress(progress: ModelDownloadProgress): string {
+  const lead = '首次使用需下载语音模型（约 241 MB，只需一次）'
+
+  if (progress.phase === 'preparing') {
+    return `${lead}：正在准备…`
+  }
+
+  const downloaded = `已下载 ${formatMb(progress.loaded)}`
+  if (progress.total > 0) {
+    return `${lead}：${downloaded} / ${formatMb(progress.total)} MB`
+  }
+  return `${lead}：${downloaded} MB`
+}
+
+/** 字节转 MB。只用于给人看的句子，所以四舍五入到整数即可。 */
+function formatMb(bytes: number): number {
+  return Math.round(bytes / 1024 / 1024)
+}
+
 export function registerJobHandlers(queue: JobQueue, db: Db, deps: HandlerDeps = {}): void {
   queue.register('scan', async (context) => {
     const directoryId = context.job.targetId
@@ -108,15 +140,15 @@ export function registerJobHandlers(queue: JobQueue, db: Db, deps: HandlerDeps =
     ext: string,
     kind: string,
   ): Promise<Result<unknown>> {
-    // 分派。字幕走解析、音视频走转写、其余如实拒绝。
+    // 分派。文本类走解析、音视频走转写、其余如实拒绝。
     //
-    // 字幕在路由那边是同步处理的（毫秒级，见 routes/extraction.ts），
+    // 文本类在路由那边是同步处理的（毫秒级，见 routes/extraction.ts），
     // 正常情况下不会出现在队列里。这里仍然认它，是为了不让「队列里的提取」
     // 与「路由里的提取」变成两套规矩——将来若有「批量重新提取」之类的入口
-    // 把字幕也丢进队列，它应当照常工作，而不是得到一句「不是音频或视频」。
-    if (isSubtitleExtension(ext)) {
-      context.reportProgress(0, 0, '正在解析字幕…')
-      return importSubtitleText(db, assetId)
+    // 把文本也丢进队列，它应当照常工作，而不是得到一句「不是音频或视频」。
+    if (canImportDirectly(ext)) {
+      context.reportProgress(0, 0, '正在读取文本…')
+      return importTextFile(db, assetId)
     }
 
     if (!isMediaKind(kind)) {
@@ -134,6 +166,15 @@ export function registerJobHandlers(queue: JobQueue, db: Db, deps: HandlerDeps =
       // 阶段名直接翻成人话写进任务表。前端一轮询就能看到它，
       // 而「正在转写」这四个字是用户决定「要不要继续等」的唯一依据。
       onPhase: (phase) => context.reportProgress(0, 0, PHASE_MESSAGES[phase]),
+      // 下载进度走**确定**进度条（0–100），不是上面那种不确定的。
+      // 这是唯一一处能算出「还剩多久」的步骤，也就该把它算出来——
+      // 让用户面对一个不知道还要多久的转写，是这条链路上最容易劝退人的地方。
+      onModelDownload: (progress) =>
+        context.reportProgress(
+          progress.percent ?? 0,
+          progress.percent === null ? 0 : PROGRESS_PERCENT_SCALE,
+          describeModelProgress(progress),
+        ),
     })
     if (!result.ok) return result
 

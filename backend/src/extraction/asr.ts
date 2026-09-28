@@ -72,17 +72,143 @@ export function resetAsrForTest(): void {
 }
 
 /**
+ * 模型下载进度（任务 5.11）。
+ *
+ * 存在的理由很具体：**首次转写要下 241 MB，而这一步以前对外是隐形的**。
+ * 用户点了「提取语音文字」，界面上只有一句「正在转写语音（最耗时的一步…）」
+ * 挂在那里，一小时不动。他不知道程序是在下载、是在算、还是已经死了，
+ * 于是多半会在中途关掉窗口——而那次下载的成果**一点都没留下**。
+ *
+ * 所以这里报的是「下了多少」，让界面把它显示成一个真进度条。
+ */
+export interface ModelDownloadProgress {
+  /**
+   * `preparing` 表示已开始加载、但还没有任何字节到达。
+   *
+   * 它同时覆盖两种截然不同的情况，且**不打算区分**：首次使用时是「马上要下载」，
+   * 模型已缓存时是「正在读本地文件 + 初始化」。两者都只有几秒，
+   * 而要区分它们就得在加载之前先探一次缓存目录——多一次 IO，换一句差别不大的提示。
+   */
+  phase: 'preparing' | 'downloading'
+  /** 已下载字节数（所有已知文件之和） */
+  loaded: number
+  /** 已知的总字节数；一个字节都不知道时为 0 */
+  total: number
+  /** 0–100 的整数；总量未知时为 null（界面据此显示不确定进度条） */
+  percent: number | null
+  /** 正在下载的文件名。百分比长时间不动时，它是「确实在动」的唯一证据 */
+  file: string
+}
+
+/** 只接受正数，其余（含 NaN / 负数 / 字符串）一律当 0 */
+function toBytes(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0
+}
+
+function sumBytes(map: Map<string, number>): number {
+  let total = 0
+  for (const value of map.values()) total += value
+  return total
+}
+
+/**
+ * 把 Transformers.js 的 `progress_callback` 事件流聚合成一个整体进度。
+ *
+ * 它是**纯函数**（返回的闭包只依赖传入的事件），所以不需要下载任何模型就能测——
+ * 而这里恰恰是最该测的地方：算错了不会报错，只会让进度条走得莫名其妙。
+ *
+ * 两件必须处理对的事：
+ *
+ * 1. **按文件累计，而不是只看当前文件。** 一个模型由多个文件组成
+ *    （config / tokenizer / 权重），只用当前文件算的话，权重下完切到下一个文件时
+ *    百分比会从 100% 掉回 0。
+ * 2. **最高点只增不减。** 新文件开始下载时它的总量才第一次被知道，分母会突然变大，
+ *    算出来的百分比同样会倒退。**一个会倒退的进度条看起来就像坏了**，
+ *    所以记住走过的最高点——宁可停一下，也不往回走。
+ */
+export function createModelProgressReporter(
+  onProgress: (progress: ModelDownloadProgress) => void,
+): (event: unknown) => void {
+  const loaded = new Map<string, number>()
+  const totals = new Map<string, number>()
+  let highWater = 0
+
+  const emit = (phase: ModelDownloadProgress['phase'], file: string): void => {
+    const total = sumBytes(totals)
+    const done = sumBytes(loaded)
+
+    let percent: number | null = null
+    if (phase === 'downloading' && total > 0) {
+      highWater = Math.max(highWater, Math.min(100, Math.round((done / total) * 100)))
+      percent = highWater
+    }
+
+    onProgress({ phase, loaded: done, total, percent, file })
+  }
+
+  return (event) => {
+    if (typeof event !== 'object' || event === null) return
+    const raw = event as { status?: unknown; file?: unknown; loaded?: unknown; total?: unknown }
+    if (typeof raw.status !== 'string') return
+
+    const file = typeof raw.file === 'string' && raw.file !== '' ? raw.file : '当前文件'
+
+    if (raw.status === 'initiate') {
+      const total = toBytes(raw.total)
+      if (total > 0) totals.set(file, total)
+      emit('preparing', file)
+      return
+    }
+
+    // 其余状态（ready / done 之外还有各种内部状态）不认识就忽略——
+    // 上游加个新状态不该让这里报错，更不该让进度条乱走。
+    if (raw.status !== 'download' && raw.status !== 'progress' && raw.status !== 'done') return
+
+    const fileTotal = toBytes(raw.total)
+    if (fileTotal > 0) totals.set(file, fileTotal)
+
+    const reported = toBytes(raw.loaded)
+    const known = loaded.get(file) ?? 0
+    // 文件下完时 loaded 常常缺席或是 0。用总量补齐，否则最后一个文件永远停在 99%，
+    // 任务看起来差一点点就永远完不成。
+    //
+    // 总量优先取本事件里的，没有就退回**先前记住的**——`done` 事件经常不带 total，
+    // 只认本事件的话这里会静默地什么都不做（这条是测试先发现、再回来改的）。
+    const declared = fileTotal > 0 ? fileTotal : (totals.get(file) ?? 0)
+    loaded.set(
+      file,
+      raw.status === 'done' && declared > 0 ? Math.max(reported, declared) : Math.max(reported, known),
+    )
+    emit('downloading', file)
+  }
+}
+
+/**
  * 取得（必要时加载）转写管线。
+ *
+ * `onProgress` 可选。**并发调用时只有第一个调用者的回调会被用上**：
+ * 模型是进程内单例，只加载一次，而第二个调用者拿到的是同一个 Promise。
+ * 这不构成问题——提取队列本身是串行的，同一时刻只有一个调用者。
  *
  * 失败时**清掉缓存的 Promise**，否则一次网络故障会被永久记住，
  * 用户重试时拿到的是同一个已失败的 Promise，看起来像「重试没用」。
  */
-export async function getTranscriber(): Promise<Result<AutomaticSpeechRecognitionPipeline>> {
+export async function getTranscriber(
+  onProgress?: (progress: ModelDownloadProgress) => void,
+): Promise<Result<AutomaticSpeechRecognitionPipeline>> {
   if (loaded) return ok(loaded)
 
   if (!loading) {
     configureEnv()
-    loading = pipeline('automatic-speech-recognition', asrModel, { dtype: asrDtype as 'q8' })
+    // 先报一次「开始了」。下载前的 DNS / 建连可能沉默好几秒，
+    // 没有这一下，界面会停在上一句话上不动。
+    onProgress?.({ phase: 'preparing', loaded: 0, total: 0, percent: null, file: '' })
+
+    const reporter = onProgress === undefined ? undefined : createModelProgressReporter(onProgress)
+    loading = pipeline('automatic-speech-recognition', asrModel, {
+      dtype: asrDtype as 'q8',
+      ...(reporter === undefined ? {} : { progress_callback: reporter }),
+    })
       .then((p) => {
         loaded = p
         return p
@@ -98,10 +224,16 @@ export async function getTranscriber(): Promise<Result<AutomaticSpeechRecognitio
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause)
     // 首次使用要下模型，所以「加载失败」最常见的两种原因是网络与磁盘。
-    // 提示里必须说清这一点，否则用户只会看到一句英文报错。
+    //
+    // 这里必须给出**下一步怎么办**，而不只是「失败了」。用户此刻卡在一句英文
+    // 报错前面，最容易得出的结论是「这软件坏了」；而实际原因多半只有一个：
+    // 直连 huggingface.co 太慢或不通。换镜像这一招在 README 里有，但用户
+    // 是在这里撞上失败的，说明就得写在这里。
     return err(
       'EXTRACTION_FAILED',
-      `语音模型加载失败（首次使用需要联网下载约 241 MB）：${message}`,
+      `语音模型加载失败（首次使用需要联网下载约 241 MB，之后不再下载）：${message}\n` +
+        `若怀疑是网络问题，可在 .env 里加一行 HF_ENDPOINT=https://hf-mirror.com 后重启再试。\n` +
+        `字幕与纯文本的导入不依赖模型，不受影响。`,
       { model: asrModel, endpoint: hfEndpoint },
     )
   }
@@ -131,14 +263,18 @@ export interface AudioInput {
  */
 export async function transcribeAudio(
   audio: AudioInput,
-  options: { engineLabel: string },
+  options: {
+    engineLabel: string
+    /** 首次使用时的模型下载进度，转发给 getTranscriber（任务 5.11） */
+    onModelProgress?: (progress: ModelDownloadProgress) => void
+  },
 ): Promise<Result<TranscribeResult>> {
   if (audio.samples.length === 0) {
     // 空音频不是错误：视频没有音轨是常见情况，交给调用方走「已提取、文本为空」
     return ok({ segments: [], text: '', durationMs: null, engine: options.engineLabel })
   }
 
-  const transcriber = await getTranscriber()
+  const transcriber = await getTranscriber(options.onModelProgress)
   if (!transcriber.ok) return transcriber
 
   const durationMs =

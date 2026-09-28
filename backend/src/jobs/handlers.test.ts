@@ -5,10 +5,11 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
 import type { Db } from '../db/index.js'
-import type { AudioInput, TranscribeResult } from '../extraction/asr.js'
+import type { AudioInput, ModelDownloadProgress, TranscribeResult } from '../extraction/asr.js'
 import { syncAssetExtractStatus, watchExtractJobs } from '../extraction/asset-status.js'
 import { listSegments } from '../extraction/importer.js'
 import type { MediaDeps } from '../extraction/media.js'
+import { search } from '../search/index.js'
 import { createAsset, createDirectory } from '../test/factory.js'
 import { createTestDb } from '../test/temp-db.js'
 import { err, ok, type Result } from '../shared/result.js'
@@ -19,7 +20,7 @@ import { createJobQueue, type JobQueue } from './queue.js'
  * 提取任务处理器的测试 —— **整条链路的端到端验证**（任务 5.4）。
  *
  * 这里跑的是真实的东西：真的队列、真的任务表、真的分派、真的落库。
- * 唯一被替换掉的是模型本身（238 MB，见 media.test.ts 的说明）。
+ * 唯一被替换掉的是模型本身（241 MB，见 media.test.ts 的说明）。
  * 于是「入队 → 取出 → 分派 → 转写 → 落库 → 状态流转」这条链路
  * 每一次提交都被完整走一遍，而不是只测了其中一段就当作整条通了。
  */
@@ -34,10 +35,16 @@ const TRANSCRIPT: TranscribeResult = {
   engine: 'test',
 }
 
+/** 转写时传给引擎的选项。具名是为了让桩能直接标注参数类型 */
+interface TranscribeOptions {
+  engineLabel: string
+  onModelProgress?: (progress: ModelDownloadProgress) => void
+}
+
 /** 转写桩的签名。写成具名类型是为了能断言调用参数，同时仍满足 MediaDeps */
 type TranscribeFn = (
   audio: AudioInput,
-  options: { engineLabel: string },
+  options: TranscribeOptions,
 ) => Promise<Result<TranscribeResult>>
 
 let db: Db
@@ -313,6 +320,115 @@ describe('提取链路端到端', () => {
  * 要验证的是两件事：它们**一个接一个**跑（不会两个转写同时抢 CPU），
  * 以及每个素材在跑的时候，界面都能轮询到**它自己**的那条进度。
  */
+describe('模型下载引导与降级（任务 5.11）', () => {
+  /**
+   * 读最近一条 extract 任务的进度。
+   *
+   * 必须在**转写桩内部**调（此刻任务还是 running）。等 `whenIdle()` 之后再读
+   * 拿到的是被终态覆盖后的值，而那正是这条用例要避开的：它验证的是
+   * **下载过程中**用户看得见什么。
+   */
+  function runningProgress() {
+    return db
+      .prepare(
+        `SELECT progress_current AS current, progress_total AS total, progress_message AS message
+         FROM jobs WHERE type = 'extract' ORDER BY id DESC LIMIT 1`,
+      )
+      .get() as { current: number; total: number; message: string | null }
+  }
+
+  it('首次下载模型时，界面上是「在下载」而不是一句不动的「正在转写」', async () => {
+    // 这是 5.11 的核心。241 MB 的下载原本对外完全隐形：用户点了提取之后，
+    // 界面上只有一句「正在转写语音」挂着一小时。他无从判断程序是在干活、
+    // 还是在算、还是已经死了，于是多半会在中途关掉窗口——而**那次下载的成果
+    // 一点都不会留下**，下次还得从头再来一遍。这是整条链路上最容易劝退人的地方。
+    const seen: Array<{ current: number; total: number; message: string | null }> = []
+
+    const asset = mediaAsset()
+    await runExtract(
+      asset.id,
+      stubMedia({
+        transcribe: vi.fn(async (_audio: AudioInput, options: TranscribeOptions) => {
+          options.onModelProgress?.({
+            phase: 'preparing',
+            loaded: 0,
+            total: 0,
+            percent: null,
+            file: '',
+          })
+          seen.push(runningProgress())
+
+          options.onModelProgress?.({
+            phase: 'downloading',
+            loaded: 60_000_000,
+            total: 241_000_000,
+            percent: 25,
+            file: 'model.onnx',
+          })
+          seen.push(runningProgress())
+
+          return ok(TRANSCRIPT)
+        }) as unknown as Mock<TranscribeFn>,
+      }),
+    )
+
+    // 第一句：告诉用户「下载这件事开始了」，且总量未知时给不确定进度条，
+    // 而不是一个假的 0%——0% 会让人以为一个字节都没动
+    expect(seen[0]?.message).toContain('首次使用需下载语音模型')
+    expect(seen[0]?.message).toContain('正在准备')
+    expect(seen[0]?.total).toBe(0)
+
+    // 第二句：进度条要动起来。下载是整条链路上**唯一**算得出「还剩多久」的一步，
+    // 算得出来就该算出来
+    expect(seen[1]?.message).toContain('首次使用需下载语音模型')
+    expect(seen[1]?.message).toContain('已下载 57')
+    expect(seen[1]?.message).toContain('241 MB')
+    expect(seen[1]?.current).toBe(25)
+    expect(seen[1]?.total).toBe(100)
+
+    // 「只需一次」不能省：不说的话用户会以为每次提取都要重下 241 MB，
+    // 于是直接放弃这个功能
+    expect(seen[1]?.message).toContain('只需一次')
+  })
+
+  it('模型下载失败时：任务失败、原因里给出下一步，而检索不受影响', async () => {
+    // 5.11 的验收点：「下载失败或断网时应用仍可启动并**仅提供元数据与文件名检索**」。
+    // 前两件事这里验，后一件——模型没下来、检索照样按文件名命中——是重点。
+    const asset = mediaAsset('深夜食堂探店.mp4')
+
+    const jobId = await runExtract(
+      asset.id,
+      stubMedia({
+        transcribe: vi.fn(async () =>
+          err(
+            'EXTRACTION_FAILED',
+            '语音模型加载失败（首次使用需要联网下载约 241 MB，之后不再下载）：fetch failed\n' +
+              '若怀疑是网络问题，可在 .env 里加一行 HF_ENDPOINT=https://hf-mirror.com 后重启再试。\n' +
+              '字幕与纯文本的导入不依赖模型，不受影响。',
+          ),
+        ) as unknown as Mock<TranscribeFn>,
+      }),
+    )
+
+    // 原因里必须写清**下一步怎么办**。只报一句英文 fetch failed，用户最容易
+    // 得出的结论是「这软件坏了」，而真实原因多半只有一个：直连官方源不通。
+    const job = queue.get(jobId)
+    expect(job.ok && job.value.status).toBe('failed')
+    expect(job.ok && job.value.errorMessage).toContain('hf-mirror.com')
+    expect(assetRow(asset.id).extract_error).toContain('241 MB')
+
+    // 关键：模型没下来，检索仍然工作，只是范围退到文件名与标签。
+    // 这就是「降级」的全部含意——少一个功能，不是少一个能用的应用。
+    const result = search(db, '探店')
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.value.items.map((i) => i.asset.fileName)).toEqual(['深夜食堂探店.mp4'])
+      // 正文一段都没有：那次转写根本没跑成，不该凭空多出内容来
+      expect(result.value.items[0]?.matchedIn).toEqual(['file_name'])
+    }
+  })
+})
+
 describe('串行执行与进度轮询', () => {
   it('同时提交多个素材时按序执行，且各自轮询得到自己的进度', async () => {
     const names = ['一.mp4', '二.mp4', '三.mp4']
@@ -368,6 +484,59 @@ describe('串行执行与进度轮询', () => {
     for (const asset of assets) {
       expect(listSegments(db, asset.id).total).toBe(2)
     }
+  })
+
+  it('第一条炸掉之后，第二条照跑（任务 5.9 的缺口）', async () => {
+    // **这是 5.9 一直缺的那条用例。** 它的验收点写着「单个素材失败不影响
+    // 队列中其他素材」，而在此之前，这件事只由 `queue.ts` 里
+    // `finish(job.id, 'failed')` 之后继续取下一条的实现保证——没有任何一条用例
+    // 真的让一条任务在队列中间失败过。实现保证和测试保证是两回事：
+    // 前者会在某次重构里悄悄消失，而且**消失时不会有任何东西变红**。
+    //
+    // 为什么这条值得单独测：串行队列是「一次只取一条」，所以失败处理写错
+    // （异常逃逸出循环、失败的那条被反复重取、`whenIdle` 永远等不到头）
+    // 的后果都不是「一条失败」，而是**后面全部卡死**。用户看到的是一整批
+    // 素材再也没动静，而他会先去怀疑那些素材有问题。
+    //
+    // 用**抛异常**而不是返回 `err()` 来制造失败：`catch` 分支（queue.ts:261）
+    // 是这条承诺真正的实现点，而它恰恰是最不容易被走到、也最容易被删掉的一段。
+    const failing = mediaAsset('会失败的.mp4')
+    const healthy = mediaAsset('正常的.mp4')
+
+    wire()
+    // 第一次调用炸掉（属于第一条任务），之后恢复——第二条必须拿到正常的引擎
+    transcribe.mockImplementationOnce(async () => {
+      throw new Error('转写引擎炸了')
+    })
+
+    const first = queue.enqueue('extract', failing.id)
+    const second = queue.enqueue('extract', healthy.id)
+    expect(first.ok && second.ok).toBe(true)
+
+    await queue.whenIdle()
+
+    // 第一条失败，且异常被接住、记成了可读的原因
+    const firstJob = queue.get(first.ok ? first.value.id : 0)
+    expect(firstJob.ok && firstJob.value.status).toBe('failed')
+    expect(firstJob.ok && firstJob.value.errorMessage).toContain('转写引擎炸了')
+
+    // 素材回到**未提取**，而不是「提取失败」。
+    //
+    // 这不是漏写：抛异常按本项目的约定是「不该发生的编程错误」，它不经过
+    // persist.ts，也就没有留下 extraction_runs 记录；而 asset-status.ts:57
+    // 明确把「没有运行记录」一律归为「未提取、随时可以再点一次」——
+    // 与「被取消」「类型不支持」同一个归宿。
+    //
+    // 好处是它**不会留下一条假的失败记录**，用户重试即可，素材也不会卡在中间态。
+    // 代价是此刻只有任务列表里有这条原因，素材那一行看不出来。这条取舍是有意
+    // 写死的，所以在这里钉住它——哪天有人改了推导函数，这条会红。
+    expect(assetRow(failing.id).extract_status).toBe('none')
+
+    // 第二条**照常跑完**——这是整条用例的重点
+    const secondJob = queue.get(second.ok ? second.value.id : 0)
+    expect(secondJob.ok && secondJob.value.status).toBe('succeeded')
+    expect(assetRow(healthy.id).extract_status).toBe('done')
+    expect(listSegments(db, healthy.id).total).toBe(2)
   })
 })
 

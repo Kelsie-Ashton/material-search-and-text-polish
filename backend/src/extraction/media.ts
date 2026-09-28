@@ -6,7 +6,12 @@ import { findAsset } from '../library/assets.js'
 import { err, ok, type Result } from '../shared/result.js'
 import { readTextScript } from '../settings/preferences.js'
 import { asrDtype, asrModel, dataDir } from '../config.js'
-import { type AudioInput, transcribeAudio, type TranscribeResult } from './asr.js'
+import {
+  type AudioInput,
+  type ModelDownloadProgress,
+  transcribeAudio,
+  type TranscribeResult,
+} from './asr.js'
 import { extractAudio, probeMedia, type MediaInfo } from './ffmpeg.js'
 import {
   countSegments,
@@ -22,11 +27,11 @@ import { type WavData, readWav } from './wav.js'
  * 音频与视频的语音转写链路（任务 5.4）。
  *
  * 四个阶段：**探测 → 抽音轨 → 转写 → 落库**。前两个靠 ffmpeg（自带二进制），
- * 第三个靠本地 Whisper 模型（首次下载约 238 MB），第四个是纯数据库操作。
+ * 第三个靠本地 Whisper 模型（首次下载约 241 MB，实测解包后占盘），第四个是纯数据库操作。
  *
  * ## 为什么依赖要能注入
  *
- * 「转写」这一步在测试里是**不可用**的：跑一次要下载 238 MB 模型，慢到
+ * 「转写」这一步在测试里是**不可用**的：跑一次要下载 241 MB 模型，慢到
  * 无法进测试套件，而它又恰恰是这条链路里最需要被覆盖的部分——时间轴有没有
  * 落对、繁体有没有转、没有音轨的视频会不会被误判成失败。所以整条链路的每个
  * 外部动作都留了一个可替换的入口（`MediaDeps`），测试用桩替身把编排逻辑
@@ -60,7 +65,13 @@ export interface MediaDeps {
   probe: (input: string) => Promise<MediaInfo | null>
   extractAudio: (input: string, output: string) => Promise<Result<void>>
   readWav: (buffer: Buffer) => WavData
-  transcribe: (audio: AudioInput, options: { engineLabel: string }) => Promise<Result<TranscribeResult>>
+  transcribe: (
+    audio: AudioInput,
+    options: {
+      engineLabel: string
+      onModelProgress?: (progress: ModelDownloadProgress) => void
+    },
+  ) => Promise<Result<TranscribeResult>>
 }
 
 const REAL_DEPS: MediaDeps = {
@@ -105,6 +116,15 @@ export interface ExtractMediaOptions {
   isCancelled?: () => boolean
   /** 阶段变化回调。任务队列用它把进度写进 jobs 表，供界面轮询。 */
   onPhase?: (phase: ExtractPhase) => void
+  /**
+   * 首次使用时的**模型下载**进度（任务 5.11）。
+   *
+   * 单独一条通道，不并进 `onPhase`：阶段是「在做哪件事」，而下载是
+   * 「这件事做到哪儿了」。下载发生在 `transcribe` 内部，此刻阶段已经是
+   * `transcribing`——把它塞进阶段列表就得新增一个只在首次出现、且出现时机
+   * 与阶段调用的顺序对不上的枚举值。
+   */
+  onModelDownload?: (progress: ModelDownloadProgress) => void
   /** 中间产物（WAV）的落盘位置。测试指向临时目录，避免污染真实的 data/tmp。 */
   workDir?: string
 }
@@ -241,7 +261,12 @@ export async function extractMediaText(
     options.onPhase?.('transcribing')
     const transcription = await deps.transcribe(
       { samples: wav.samples, sampleRate: wav.sampleRate },
-      { engineLabel: label },
+      {
+        engineLabel: label,
+        ...(options.onModelDownload === undefined
+          ? {}
+          : { onModelProgress: options.onModelDownload }),
+      },
     )
     if (!transcription.ok) {
       markFailed(db, asset, {
